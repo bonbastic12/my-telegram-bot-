@@ -25,7 +25,10 @@ MIN_WITHDRAW = 5.00
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 crypto = AioCryptoPay(token=CRYPTO_TOKEN, network=Networks.MAIN_NET)
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
+
+ai_client = None
+if GEMINI_API_KEY:
+    ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 class BotStates(StatesGroup):
     waiting_for_channel = State()
@@ -75,7 +78,7 @@ async def start_handler(message: types.Message, command: CommandObject):
         parse_mode="Markdown"
     )
 
-# ----------------- 🤖 AI CHAT -----------------
+# ----------------- 🤖 AI CHAT (Gemini 3.8 Flash) -----------------
 @dp.message(F.text == "🤖 AI Chat")
 async def ai_chat_start(message: types.Message, state: FSMContext):
     await state.set_state(BotStates.waiting_for_ai_prompt)
@@ -84,7 +87,7 @@ async def ai_chat_start(message: types.Message, state: FSMContext):
         resize_keyboard=True
     )
     await message.answer(
-        "🤖 **የ AI ረዳት ክፍል**\n\n"
+        "🤖 **የ AI ረዳት ክፍል (Gemini 3.8 Flash)**\n\n"
         "የሚፈልጉትን ማንኛውንም ጥያቄ፣ ለማስታወቂያ የሚሆን የጽሑፍ ሃሳብ ወይም ማንኛውንም ርዕስ ይጠይቁኝ፦\n"
         "*(ለመውጣት '🔙 Back to Menu' የሚለውን ይጫኑ)*",
         reply_markup=cancel_btn,
@@ -98,16 +101,24 @@ async def ai_chat_exit(message: types.Message, state: FSMContext):
 
 @dp.message(BotStates.waiting_for_ai_prompt)
 async def ai_chat_response(message: types.Message):
+    if not ai_client:
+        await message.answer("⚠️ GEMINI_API_KEY አልተገኘም። እባክዎ Render ላይ Environment Variable መግባቱን ያረጋግጡ።")
+        return
+
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
+        response = await asyncio.to_thread(
+            ai_client.models.generate_content,
+            model="gemini-3.8-flash",
             contents=message.text
         )
-        await message.answer(response.text)
+        if response and response.text:
+            await message.answer(response.text)
+        else:
+            await message.answer("⚠️ ምንም መልስ ማመንጨት አልተቻለም።")
     except Exception as e:
         print(f"AI Error: {e}")
-        await message.answer("❌ ይቅርታ፣ ምላሽ መስጠት አልተቻለም። እባክዎ ጥቂት ቆይተው እንደገና ይሞክሩ።")
+        await message.answer(f"❌ ስህተት ተፈጥሯል፦ {e}")
 
 # ----------------- 💳 DEPOSIT (CRYPTO PAY) -----------------
 @dp.message(F.text == "💳 Deposit")
