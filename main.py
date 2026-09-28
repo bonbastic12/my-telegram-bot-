@@ -8,6 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiocryptopay import AioCryptoPay, Networks
+from google import genai
 from database import (
     init_db, add_user, get_user_balance, update_user_balance, deduct_user_balance,
     add_channel, get_all_channels, save_ad, get_active_ads, create_withdrawal
@@ -15,13 +16,16 @@ from database import (
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CRYPTO_TOKEN = "639734:AAyANr5PBtEHPO5344cjssr6BQ5yGI6I7jA"
-ADMIN_ID = 6179388927  # የአስተዳዳሪው ቴሌግራም መለያ
-AD_PRICE = 1.00        # የአንድ ማስታወቂያ ዋጋ
-MIN_WITHDRAW = 5.00    # ዝቅተኛው ማውጣት የሚቻለው መጠን
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+ADMIN_ID = 6179388927
+AD_PRICE = 1.00
+MIN_WITHDRAW = 5.00
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 crypto = AioCryptoPay(token=CRYPTO_TOKEN, network=Networks.MAIN_NET)
+ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 class BotStates(StatesGroup):
     waiting_for_channel = State()
@@ -29,6 +33,7 @@ class BotStates(StatesGroup):
     waiting_for_ad_text = State()
     waiting_for_withdraw_amount = State()
     waiting_for_withdraw_wallet = State()
+    waiting_for_ai_prompt = State()
 
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
@@ -70,16 +75,51 @@ async def start_handler(message: types.Message, command: CommandObject):
         parse_mode="Markdown"
     )
 
+# ----------------- 🤖 AI CHAT -----------------
+@dp.message(F.text == "🤖 AI Chat")
+async def ai_chat_start(message: types.Message, state: FSMContext):
+    await state.set_state(BotStates.waiting_for_ai_prompt)
+    cancel_btn = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🔙 Back to Menu")]],
+        resize_keyboard=True
+    )
+    await message.answer(
+        "🤖 **የ AI ረዳት ክፍል**\n\n"
+        "የሚፈልጉትን ማንኛውንም ጥያቄ፣ ለማስታወቂያ የሚሆን የጽሑፍ ሃሳብ ወይም ማንኛውንም ርዕስ ይጠይቁኝ፦\n"
+        "*(ለመውጣት '🔙 Back to Menu' የሚለውን ይጫኑ)*",
+        reply_markup=cancel_btn,
+        parse_mode="Markdown"
+    )
+
+@dp.message(BotStates.waiting_for_ai_prompt, F.text == "🔙 Back to Menu")
+async def ai_chat_exit(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("ወደ ዋናው ሜኑ ተመልሰዋል፦", reply_markup=main_menu)
+
+@dp.message(BotStates.waiting_for_ai_prompt)
+async def ai_chat_response(message: types.Message):
+    if not GEMINI_API_KEY:
+        await message.answer("⚠️ የ AI አገልግሎት አልተገናኘም። እባክዎ አስተዳዳሪውን ያነጋግሩ።")
+        return
+
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    try:
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=message.text
+        )
+        await message.answer(response.text)
+    except Exception as e:
+        await message.answer("❌ ይቅርታ፣ ምላሽ መስጠት አልተቻለም። እባክዎ ጥቂት ቆይተው እንደገና ይሞክሩ።")
+
 # ----------------- 💳 DEPOSIT (CRYPTO PAY) -----------------
 @dp.message(F.text == "💳 Deposit")
 async def deposit_handler(message: types.Message):
     invoice = await crypto.create_invoice(asset='USDT', amount=1.0)
-    
     pay_keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Pay 1.00 USDT", url=invoice.bot_invoice_url)],
         [InlineKeyboardButton(text="🔄 Verify Payment", callback_data=f"verify_pay:{invoice.invoice_id}:1.0")]
     ])
-    
     await message.answer(
         "💳 **Crypto Deposit (USDT)**\n\n"
         "ወደ ሂሳብዎ **1.00 USDT** ለመጨመር ከታች ያለውን **Pay 1.00 USDT** የሚለውን ቁልፍ ተጭነው ይክፈሉ።\n\n"
@@ -92,7 +132,6 @@ async def deposit_handler(message: types.Message):
 async def check_payment_status(callback: types.CallbackQuery):
     _, invoice_id, amount = callback.data.split(":")
     invoices = await crypto.get_invoices(invoice_ids=[int(invoice_id)])
-    
     if invoices and invoices[0].status == 'paid':
         await update_user_balance(callback.from_user.id, float(amount))
         await callback.message.answer(f"✅ ክፍያዎ ተረጋግጧል! **${amount} USDT** ወደ ሂሳብዎ ተጨምሯል።")
@@ -100,7 +139,7 @@ async def check_payment_status(callback: types.CallbackQuery):
     else:
         await callback.answer("❌ ክፍያው ገና አልተጠናቀቀም። እባክዎ ከከፈሉ በኋላ ደግመው ይሞክሩ።", show_alert=True)
 
-# ----------------- 🏧 WITHDRAW (ገንዘብ ማውጫ) -----------------
+# ----------------- 🏧 WITHDRAW -----------------
 @dp.message(F.text == "🏧 Withdraw")
 async def withdraw_start(message: types.Message, state: FSMContext):
     balance = await get_user_balance(message.from_user.id)
@@ -146,7 +185,6 @@ async def process_withdraw_wallet(message: types.Message, state: FSMContext):
     amount = data.get("withdraw_amount")
     user_id = message.from_user.id
 
-    # ከሂሳቡ መቀነስ
     deducted = await deduct_user_balance(user_id, amount)
     if not deducted:
         await state.clear()
@@ -156,7 +194,6 @@ async def process_withdraw_wallet(message: types.Message, state: FSMContext):
     await create_withdrawal(user_id, amount, wallet)
     await state.clear()
 
-    # ለተጠቃሚው ማረጋገጫ መስጠት
     await message.answer(
         f"✅ **የማውጣት ጥያቄዎ በተሳካ ሁኔታ ተልኳል!**\n\n"
         f"💵 መጠን፦ **{amount:.2f} USDT**\n"
@@ -166,7 +203,6 @@ async def process_withdraw_wallet(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-    # ለአስተዳዳሪው (Admin) ማሳወቂያ መላክ
     try:
         await bot.send_message(
             chat_id=ADMIN_ID,
@@ -309,7 +345,7 @@ async def balance_handler(message: types.Message):
 @dp.message(F.text == "👥 Referral")
 async def referral_handler(message: types.Message):
     bot_info = await bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start={message.from_user.id}[span_2](start_span)[span_3](start_span)"[span_2](end_span)[span_3](end_span)
+    ref_link = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
     await message.answer(f"👥 **የመጋበዣ ሊንክዎ**፦\n`{ref_link}`", parse_mode="Markdown")
 
 async def run_bot():
