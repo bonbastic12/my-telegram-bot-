@@ -1,6 +1,11 @@
 import asyncio
 import os
 import traceback
+import hashlib
+import hmac
+import json
+import time
+import urllib.parse
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
@@ -39,20 +44,37 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 CRYPTO_TOKEN = os.environ.get("CRYPTO_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
+# Render → Environment Variables
+# Example:
+# https://your-app.onrender.com/miniapp
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "").strip()
+
 ADMIN_ID = 6179388927
 
 AD_PRICE = 1.00
 MIN_WITHDRAW = 5.00
 
-# Main Gemini model
 GEMINI_MODEL = "gemini-3.8-flash"
-
-# Fallback model
 GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
 
 
 # ============================================================
-# BASIC CHECKS
+# PATHS
+# ============================================================
+
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+WEBAPP_FILE = os.path.join(
+    BASE_DIR,
+    "webapp",
+    "index.html"
+)
+
+
+# ============================================================
+# BASIC CHECK
 # ============================================================
 
 if not BOT_TOKEN:
@@ -63,15 +85,18 @@ if not BOT_TOKEN:
 
 
 # ============================================================
-# TELEGRAM BOT
+# TELEGRAM
 # ============================================================
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(
+    token=BOT_TOKEN
+)
+
 dp = Dispatcher()
 
 
 # ============================================================
-# CRYPTO PAY
+# CRYPTOPAY
 # ============================================================
 
 crypto = None
@@ -86,44 +111,65 @@ if CRYPTO_TOKEN:
         print("CryptoPay: ENABLED")
 
     except Exception as e:
-        print("CryptoPay initialization error:")
-        print(type(e).__name__, str(e))
+
+        print(
+            "CryptoPay initialization error:",
+            type(e).__name__,
+            str(e)
+        )
+
         crypto = None
 
 else:
-    print("CryptoPay: DISABLED - CRYPTO_TOKEN missing")
+
+    print(
+        "CryptoPay: DISABLED - CRYPTO_TOKEN missing"
+    )
 
 
 # ============================================================
-# GEMINI AI
+# GEMINI
 # ============================================================
 
 ai_client = None
 
 if GEMINI_API_KEY:
+
     try:
+
         ai_client = genai.Client(
             api_key=GEMINI_API_KEY
         )
 
-        print("Gemini client: INITIALIZED")
+        print(
+            "Gemini client: INITIALIZED"
+        )
 
     except Exception as e:
-        print("Gemini initialization error:")
-        print(type(e).__name__, str(e))
+
+        print(
+            "Gemini initialization error:",
+            type(e).__name__,
+            str(e)
+        )
+
         ai_client = None
 
 else:
-    print("Gemini AI: DISABLED - GEMINI_API_KEY missing")
+
+    print(
+        "Gemini AI: DISABLED - GEMINI_API_KEY missing"
+    )
 
 
 # ============================================================
 # PAYMENT PROTECTION
 # ============================================================
 
-# Prevent the same invoice from being credited multiple times
-# during the same bot runtime.
 processed_invoices = set()
+
+# Mini App invoices created during current runtime
+pending_invoices = {}
 
 
 # ============================================================
@@ -146,7 +192,118 @@ class BotStates(StatesGroup):
 
 
 # ============================================================
-# RENDER WEB SERVER
+# TELEGRAM MINI APP VALIDATION
+# ============================================================
+
+def validate_telegram_init_data(
+    init_data: str
+):
+    """
+    Verify Telegram WebApp initData.
+
+    Returns Telegram user dict if valid.
+    Returns None if invalid.
+    """
+
+    if not init_data or not BOT_TOKEN:
+        return None
+
+    try:
+
+        parsed = urllib.parse.parse_qsl(
+            init_data,
+            keep_blank_values=True
+        )
+
+        data = dict(parsed)
+
+        received_hash = data.pop(
+            "hash",
+            None
+        )
+
+        if not received_hash:
+            return None
+
+        data_check_string = "\n".join(
+            f"{key}={data[key]}"
+            for key in sorted(data)
+        )
+
+        secret_key = hmac.new(
+            b"WebAppData",
+            BOT_TOKEN.encode(),
+            hashlib.sha256
+        ).digest()
+
+        calculated_hash = hmac.new(
+            secret_key,
+            data_check_string.encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(
+            calculated_hash,
+            received_hash
+        ):
+            return None
+
+        auth_date = int(
+            data.get(
+                "auth_date",
+                "0"
+            )
+        )
+
+        # Reject very old sessions
+        if time.time() - auth_date > 86400:
+            return None
+
+        user_json = data.get("user")
+
+        if not user_json:
+            return None
+
+        return json.loads(user_json)
+
+    except Exception as e:
+
+        print(
+            "Mini App validation error:",
+            type(e).__name__,
+            str(e)
+        )
+
+        return None
+
+
+def get_miniapp_user(request):
+    """
+    Get authenticated Telegram user
+    from Mini App request.
+    """
+
+    init_data = request.headers.get(
+        "X-Telegram-Init-Data",
+        ""
+    )
+
+    return validate_telegram_init_data(
+        init_data
+    )
+
+
+def unauthorized():
+    return web.json_response(
+        {
+            "error": "Unauthorized. Open the Mini App from Telegram."
+        },
+        status=401
+    )
+
+
+# ============================================================
+# RENDER PING
 # ============================================================
 
 async def handle_ping(request):
@@ -156,16 +313,1004 @@ async def handle_ping(request):
     )
 
 
+# ============================================================
+# MINI APP PAGE
+# ============================================================
+
+async def miniapp_page(request):
+
+    if not os.path.exists(WEBAPP_FILE):
+
+        return web.Response(
+            text=(
+                "Mini App file not found. "
+                "Create webapp/index.html"
+            ),
+            status=500
+        )
+
+    return web.FileResponse(
+        WEBAPP_FILE
+    )
+
+
+# ============================================================
+# API: ME
+# ============================================================
+
+async def api_me(request):
+
+    user = get_miniapp_user(request)
+
+    if not user:
+        return unauthorized()
+
+    user_id = int(
+        user["id"]
+    )
+
+    try:
+
+        await add_user(
+            user_id,
+            None
+        )
+
+        balance = await get_user_balance(
+            user_id
+        )
+
+        return web.json_response(
+            {
+                "id": user_id,
+                "first_name": user.get(
+                    "first_name",
+                    ""
+                ),
+                "username": user.get(
+                    "username",
+                    ""
+                ),
+                "balance": float(
+                    balance or 0
+                )
+            }
+        )
+
+    except Exception as e:
+
+        print(
+            "API /me error:",
+            type(e).__name__,
+            str(e)
+        )
+
+        return web.json_response(
+            {
+                "error": "Could not load account."
+            },
+            status=500
+        )
+
+
+# ============================================================
+# API: ACTIVE ADS
+# ============================================================
+
+async def api_my_ads(request):
+
+    user = get_miniapp_user(request)
+
+    if not user:
+        return unauthorized()
+
+    try:
+
+        ads = await get_active_ads()
+
+        result = []
+
+        for channel, text in ads:
+
+            result.append(
+                {
+                    "channel": channel,
+                    "text": text
+                }
+            )
+
+        return web.json_response(
+            {
+                "ads": result
+            }
+        )
+
+    except Exception as e:
+
+        print(
+            "API /my-ads error:",
+            type(e).__name__,
+            str(e)
+        )
+
+        return web.json_response(
+            {
+                "error": "Could not load ads."
+            },
+            status=500
+        )
+
+
+# ============================================================
+# API: REFERRAL
+# ============================================================
+
+async def api_referral(request):
+
+    user = get_miniapp_user(request)
+
+    if not user:
+        return unauthorized()
+
+    try:
+
+        bot_info = await bot.get_me()
+
+        link = (
+            f"https://t.me/"
+            f"{bot_info.username}"
+            f"?start={user['id']}"
+        )
+
+        return web.json_response(
+            {
+                "link": link
+            }
+        )
+
+    except Exception as e:
+
+        print(
+            "API referral error:",
+            e
+        )
+
+        return web.json_response(
+            {
+                "error": "Could not create referral link."
+            },
+            status=500
+        )
+
+
+# ============================================================
+# API: CHANNELS
+# ============================================================
+
+async def api_channels(request):
+
+    user = get_miniapp_user(request)
+
+    if not user:
+        return unauthorized()
+
+    try:
+
+        body = await request.json()
+
+    except Exception:
+
+        return web.json_response(
+            {
+                "error": "Invalid JSON."
+            },
+            status=400
+        )
+
+    username = str(
+        body.get(
+            "username",
+            ""
+        )
+    ).strip()
+
+    if not username:
+
+        return web.json_response(
+            {
+                "error": "Channel username is required."
+            },
+            status=400
+        )
+
+    if not username.startswith("@"):
+
+        username = "@" + username
+
+    try:
+
+        chat = await bot.get_chat(
+            username
+        )
+
+        me = await bot.get_me()
+
+        member = await bot.get_chat_member(
+            chat.id,
+            me.id
+        )
+
+        if member.status not in [
+            "administrator",
+            "creator"
+        ]:
+
+            return web.json_response(
+                {
+                    "error": (
+                        "Make the bot an administrator "
+                        "of the channel first."
+                    )
+                },
+                status=400
+            )
+
+        success = await add_channel(
+            int(user["id"]),
+            username,
+            chat.title
+        )
+
+        if success:
+
+            return web.json_response(
+                {
+                    "message": (
+                        f"{chat.title} registered successfully."
+                    )
+                }
+            )
+
+        return web.json_response(
+            {
+                "message": "Channel already registered."
+            }
+        )
+
+    except Exception as e:
+
+        print(
+            "Mini App channel error:",
+            type(e).__name__,
+            str(e)
+        )
+
+        return web.json_response(
+            {
+                "error": (
+                    "Channel not found or "
+                    "bot is not an admin."
+                )
+            },
+            status=400
+        )
+
+
+# ============================================================
+# API: ADVERTISE
+# ============================================================
+
+async def api_advertise(request):
+
+    user = get_miniapp_user(request)
+
+    if not user:
+        return unauthorized()
+
+    try:
+
+        body = await request.json()
+
+    except Exception:
+
+        return web.json_response(
+            {
+                "error": "Invalid JSON."
+            },
+            status=400
+        )
+
+    user_id = int(
+        user["id"]
+    )
+
+    channel = str(
+        body.get(
+            "channel",
+            ""
+        )
+    ).strip()
+
+    ad_text = str(
+        body.get(
+            "text",
+            ""
+        )
+    ).strip()
+
+    if not channel:
+
+        return web.json_response(
+            {
+                "error": "Channel is required."
+            },
+            status=400
+        )
+
+    if not ad_text:
+
+        return web.json_response(
+            {
+                "error": "Advertisement text is required."
+            },
+            status=400
+        )
+
+    if not channel.startswith("@"):
+
+        channel = "@" + channel
+
+    balance = await get_user_balance(
+        user_id
+    )
+
+    if balance < AD_PRICE:
+
+        return web.json_response(
+            {
+                "error": (
+                    f"Insufficient balance. "
+                    f"Required: {AD_PRICE:.2f} USDT."
+                )
+            },
+            status=400
+        )
+
+    deducted = await deduct_user_balance(
+        user_id,
+        AD_PRICE
+    )
+
+    if not deducted:
+
+        return web.json_response(
+            {
+                "error": "Could not deduct balance."
+            },
+            status=400
+        )
+
+    try:
+
+        await save_ad(
+            user_id,
+            channel,
+            ad_text
+        )
+
+    except Exception as e:
+
+        print(
+            "Mini App save ad error:",
+            type(e).__name__,
+            str(e)
+        )
+
+        # Refund if saving failed
+        try:
+
+            await update_user_balance(
+                user_id,
+                AD_PRICE
+            )
+
+        except Exception as refund_error:
+
+            print(
+                "Refund error:",
+                type(refund_error).__name__,
+                str(refund_error)
+            )
+
+        return web.json_response(
+            {
+                "error": (
+                    "Advertisement could not be saved. "
+                    "Your balance was refunded."
+                )
+            },
+            status=500
+        )
+
+    new_balance = await get_user_balance(
+        user_id
+    )
+
+    return web.json_response(
+        {
+            "message": (
+                "Advertisement submitted successfully."
+            ),
+            "charged": AD_PRICE,
+            "balance": float(
+                new_balance or 0
+            )
+        }
+    )
+
+
+# ============================================================
+# API: WITHDRAW
+# ============================================================
+
+async def api_withdraw(request):
+
+    user = get_miniapp_user(request)
+
+    if not user:
+        return unauthorized()
+
+    try:
+
+        body = await request.json()
+
+    except Exception:
+
+        return web.json_response(
+            {
+                "error": "Invalid JSON."
+            },
+            status=400
+        )
+
+    user_id = int(
+        user["id"]
+    )
+
+    wallet = str(
+        body.get(
+            "wallet",
+            ""
+        )
+    ).strip()
+
+    try:
+
+        amount = float(
+            body.get(
+                "amount"
+            )
+        )
+
+    except Exception:
+
+        return web.json_response(
+            {
+                "error": "Invalid withdrawal amount."
+            },
+            status=400
+        )
+
+    balance = await get_user_balance(
+        user_id
+    )
+
+    if amount < MIN_WITHDRAW:
+
+        return web.json_response(
+            {
+                "error": (
+                    f"Minimum withdrawal is "
+                    f"{MIN_WITHDRAW:.2f} USDT."
+                )
+            },
+            status=400
+        )
+
+    if amount > balance:
+
+        return web.json_response(
+            {
+                "error": (
+                    f"Insufficient balance. "
+                    f"Available: {balance:.2f} USDT."
+                )
+            },
+            status=400
+        )
+
+    if not wallet:
+
+        return web.json_response(
+            {
+                "error": "Wallet is required."
+            },
+            status=400
+        )
+
+    deducted = await deduct_user_balance(
+        user_id,
+        amount
+    )
+
+    if not deducted:
+
+        return web.json_response(
+            {
+                "error": "Could not process withdrawal."
+            },
+            status=400
+        )
+
+    try:
+
+        await create_withdrawal(
+            user_id,
+            amount,
+            wallet
+        )
+
+    except Exception as e:
+
+        print(
+            "Create withdrawal error:",
+            type(e).__name__,
+            str(e)
+        )
+
+        # Refund
+        try:
+
+            await update_user_balance(
+                user_id,
+                amount
+            )
+
+        except Exception:
+            pass
+
+        return web.json_response(
+            {
+                "error": (
+                    "Withdrawal could not be created. "
+                    "Your balance was refunded."
+                )
+            },
+            status=500
+        )
+
+    # Notify admin
+    try:
+
+        await bot.send_message(
+
+            chat_id=ADMIN_ID,
+
+            text=(
+                "🚨 New Mini App withdrawal\n\n"
+                f"User: {user.get('first_name', '')}\n"
+                f"ID: {user_id}\n"
+                f"Amount: {amount:.2f} USDT\n"
+                f"Wallet: {wallet}"
+            )
+
+        )
+
+    except Exception as e:
+
+        print(
+            "Admin notification error:",
+            e
+        )
+
+    return web.json_response(
+        {
+            "message": (
+                "Withdrawal request submitted successfully."
+            ),
+            "amount": amount
+        }
+    )
+
+
+# ============================================================
+# API: CREATE DEPOSIT
+# ============================================================
+
+async def api_deposit(request):
+
+    user = get_miniapp_user(request)
+
+    if not user:
+        return unauthorized()
+
+    if crypto is None:
+
+        return web.json_response(
+            {
+                "error": (
+                    "CryptoPay is not configured."
+                )
+            },
+            status=503
+        )
+
+    try:
+
+        invoice = await crypto.create_invoice(
+            asset="USDT",
+            amount=1.0
+        )
+
+        invoice_id = int(
+            invoice.invoice_id
+        )
+
+        pending_invoices[
+            invoice_id
+        ] = int(
+            user["id"]
+        )
+
+        return web.json_response(
+            {
+                "url": invoice.bot_invoice_url,
+                "invoice_id": invoice_id,
+                "amount": 1.0
+            }
+        )
+
+    except Exception as e:
+
+        print(
+            "Mini App deposit error:",
+            type(e).__name__,
+            str(e)
+        )
+
+        return web.json_response(
+            {
+                "error": (
+                    "Could not create deposit invoice."
+                )
+            },
+            status=500
+        )
+
+
+# ============================================================
+# API: VERIFY DEPOSIT
+# ============================================================
+
+async def api_verify_deposit(request):
+
+    user = get_miniapp_user(request)
+
+    if not user:
+        return unauthorized()
+
+    if crypto is None:
+
+        return web.json_response(
+            {
+                "error": "CryptoPay unavailable."
+            },
+            status=503
+        )
+
+    try:
+
+        body = await request.json()
+
+        invoice_id = int(
+            body.get(
+                "invoice_id"
+            )
+        )
+
+    except Exception:
+
+        return web.json_response(
+            {
+                "error": "Invalid invoice ID."
+            },
+            status=400
+        )
+
+    user_id = int(
+        user["id"]
+    )
+
+    # Make sure this invoice belongs to this user
+    if pending_invoices.get(
+        invoice_id
+    ) != user_id:
+
+        return web.json_response(
+            {
+                "error": "Invoice does not belong to this account."
+            },
+            status=403
+        )
+
+    if invoice_id in processed_invoices:
+
+        return web.json_response(
+            {
+                "message": "Payment already credited."
+            }
+        )
+
+    try:
+
+        invoices = await crypto.get_invoices(
+            invoice_ids=[
+                invoice_id
+            ]
+        )
+
+        if not invoices:
+
+            return web.json_response(
+                {
+                    "error": "Invoice not found."
+                },
+                status=404
+            )
+
+        invoice = invoices[0]
+
+        if invoice.status != "paid":
+
+            return web.json_response(
+                {
+                    "paid": False,
+                    "message": (
+                        "Payment is not completed yet."
+                    )
+                }
+            )
+
+        actual_amount = float(
+            invoice.amount
+        )
+
+        await update_user_balance(
+            user_id,
+            actual_amount
+        )
+
+        processed_invoices.add(
+            invoice_id
+        )
+
+        pending_invoices.pop(
+            invoice_id,
+            None
+        )
+
+        return web.json_response(
+            {
+                "paid": True,
+                "amount": actual_amount,
+                "message": (
+                    "Payment verified and balance credited."
+                )
+            }
+        )
+
+    except Exception as e:
+
+        print(
+            "Mini App payment verification error:",
+            type(e).__name__,
+            str(e)
+        )
+
+        return web.json_response(
+            {
+                "error": "Payment verification failed."
+            },
+            status=500
+        )
+
+
+# ============================================================
+# API: AI
+# ============================================================
+
+async def api_ai(request):
+
+    user = get_miniapp_user(request)
+
+    if not user:
+        return unauthorized()
+
+    if not ai_client:
+
+        return web.json_response(
+            {
+                "error": (
+                    "Gemini AI is not configured."
+                )
+            },
+            status=503
+        )
+
+    try:
+
+        body = await request.json()
+
+    except Exception:
+
+        return web.json_response(
+            {
+                "error": "Invalid JSON."
+            },
+            status=400
+        )
+
+    prompt = str(
+        body.get(
+            "prompt",
+            ""
+        )
+    ).strip()
+
+    if not prompt:
+
+        return web.json_response(
+            {
+                "error": "Enter a question."
+            },
+            status=400
+        )
+
+    system_instruction = (
+        "You are Digital Pro Ads AI Assistant. "
+        "Answer naturally, accurately and helpfully. "
+        "If the user writes in Amharic, answer in Amharic. "
+        "If English, answer in English. "
+        "If mixed, respond naturally. "
+        "Help with business, advertising, marketing, "
+        "technology, coding, writing and general questions. "
+        "Keep answers clear and useful."
+    )
+
+    full_prompt = (
+        f"{system_instruction}\n\n"
+        f"User:\n{prompt}"
+    )
+
+    for model_name in [
+        GEMINI_MODEL,
+        GEMINI_FALLBACK_MODEL
+    ]:
+
+        try:
+
+            print(
+                f"Mini App Gemini: {model_name}"
+            )
+
+            response = await asyncio.to_thread(
+
+                ai_client.models.generate_content,
+
+                model=model_name,
+
+                contents=full_prompt,
+            )
+
+            if response and response.text:
+
+                return web.json_response(
+                    {
+                        "answer": response.text.strip()
+                    }
+                )
+
+        except Exception as e:
+
+            print(
+                f"Mini App Gemini error "
+                f"{model_name}:",
+                type(e).__name__,
+                str(e)
+            )
+
+            await asyncio.sleep(1)
+
+    return web.json_response(
+        {
+            "error": (
+                "Gemini quota, API access "
+                "or model error."
+            )
+        },
+        status=503
+    )
+
+
+# ============================================================
+# START WEB SERVER
+# ============================================================
+
 async def start_web_server():
 
     app = web.Application()
 
+    # Main Render health page
     app.router.add_get(
         "/",
         handle_ping
     )
 
-    runner = web.AppRunner(app)
+    # Telegram Mini App
+    app.router.add_get(
+        "/miniapp",
+        miniapp_page
+    )
+
+    # Mini App APIs
+    app.router.add_get(
+        "/api/me",
+        api_me
+    )
+
+    app.router.add_get(
+        "/api/my-ads",
+        api_my_ads
+    )
+
+    app.router.add_get(
+        "/api/referral",
+        api_referral
+    )
+
+    app.router.add_post(
+        "/api/channels",
+        api_channels
+    )
+
+    app.router.add_post(
+        "/api/advertise",
+        api_advertise
+    )
+
+    app.router.add_post(
+        "/api/withdraw",
+        api_withdraw
+    )
+
+    app.router.add_post(
+        "/api/deposit",
+        api_deposit
+    )
+
+    app.router.add_post(
+        "/api/deposit/verify",
+        api_verify_deposit
+    )
+
+    app.router.add_post(
+        "/api/ai",
+        api_ai
+    )
+
+    runner = web.AppRunner(
+        app
+    )
 
     await runner.setup()
 
@@ -188,6 +1333,11 @@ async def start_web_server():
         f"Web server started on port {port}"
     )
 
+    print(
+        f"Mini App URL: "
+        f"{WEBAPP_URL or 'NOT SET'}"
+    )
+
 
 # ============================================================
 # MAIN MENU
@@ -198,23 +1348,39 @@ main_menu = ReplyKeyboardMarkup(
     keyboard=[
 
         [
-            KeyboardButton(text="📢 Advertise"),
-            KeyboardButton(text="➕ Add Channel"),
+            KeyboardButton(
+                text="📢 Advertise"
+            ),
+            KeyboardButton(
+                text="➕ Add Channel"
+            ),
         ],
 
         [
-            KeyboardButton(text="💰 Balance"),
-            KeyboardButton(text="👥 Referral"),
+            KeyboardButton(
+                text="💰 Balance"
+            ),
+            KeyboardButton(
+                text="👥 Referral"
+            ),
         ],
 
         [
-            KeyboardButton(text="💳 Deposit"),
-            KeyboardButton(text="🏧 Withdraw"),
+            KeyboardButton(
+                text="💳 Deposit"
+            ),
+            KeyboardButton(
+                text="🏧 Withdraw"
+            ),
         ],
 
         [
-            KeyboardButton(text="📊 My Ads"),
-            KeyboardButton(text="🤖 AI Chat"),
+            KeyboardButton(
+                text="📊 My Ads"
+            ),
+            KeyboardButton(
+                text="🤖 AI Chat"
+            ),
         ],
 
     ],
@@ -224,7 +1390,7 @@ main_menu = ReplyKeyboardMarkup(
 
 
 # ============================================================
-# START
+# START COMMAND
 # ============================================================
 
 @dp.message(CommandStart())
@@ -239,9 +1405,12 @@ async def start_handler(
 
     if command.args and command.args.isdigit():
 
-        potential_ref = int(command.args)
+        potential_ref = int(
+            command.args
+        )
 
         if potential_ref != user_id:
+
             referrer_id = potential_ref
 
     await add_user(
@@ -249,23 +1418,50 @@ async def start_handler(
         referrer_id
     )
 
+    mini_button = None
+
+    if WEBAPP_URL:
+
+        mini_button = InlineKeyboardMarkup(
+
+            inline_keyboard=[
+
+                [
+
+                    InlineKeyboardButton(
+                        text="📱 Open Digital Pro Ads",
+                        web_app=types.WebAppInfo(
+                            url=WEBAPP_URL
+                        )
+                    )
+
+                ]
+
+            ]
+
+        )
+
     await message.answer(
 
         f"ሰላም {message.from_user.first_name}! "
-        f"ወደ **Global Ad Network Bot** በደህና መጡ።\n\n"
+        f"ወደ **Global Ad Network Bot** "
+        f"በደህና መጡ።\n\n"
 
-        "📢 ማስታወቂያ ለማስተዋወቅ "
-        "ወይም የራስዎን ቻናል ለመመዝገብ "
-        "ከታች ያሉትን አዝራሮች ይጠቀሙ።",
+        "📢 ማስታወቂያ\n"
+        "💰 Balance\n"
+        "💳 Deposit\n"
+        "🏧 Withdraw\n"
+        "🤖 AI Assistant\n"
+        "➕ Add Channel",
 
-        reply_markup=main_menu,
+        reply_markup=mini_button or main_menu,
 
         parse_mode="Markdown",
     )
 
 
 # ============================================================
-# 🤖 AI CHAT START
+# AI CHAT START
 # ============================================================
 
 @dp.message(F.text == "🤖 AI Chat")
@@ -281,11 +1477,13 @@ async def ai_chat_start(
     cancel_btn = ReplyKeyboardMarkup(
 
         keyboard=[
+
             [
                 KeyboardButton(
                     text="🔙 Back to Menu"
                 )
             ]
+
         ],
 
         resize_keyboard=True,
@@ -307,7 +1505,7 @@ async def ai_chat_start(
 
 
 # ============================================================
-# 🤖 AI CHAT EXIT
+# AI EXIT
 # ============================================================
 
 @dp.message(
@@ -323,34 +1521,12 @@ async def ai_chat_exit(
 
     await message.answer(
         "ወደ ዋናው ሜኑ ተመልሰዋል።",
-        reply_markup=main_menu,
+        reply_markup=main_menu
     )
 
 
 # ============================================================
-# TELEGRAM TEXT SPLITTER
-# ============================================================
-
-def split_telegram_text(
-    text: str,
-    max_length: int = 4000
-):
-
-    if not text:
-        return []
-
-    return [
-        text[i:i + max_length]
-        for i in range(
-            0,
-            len(text),
-            max_length
-        )
-    ]
-
-
-# ============================================================
-# 🤖 AI RESPONSE
+# AI RESPONSE
 # ============================================================
 
 @dp.message(
@@ -361,106 +1537,49 @@ async def ai_chat_response(
     state: FSMContext
 ):
 
-    # --------------------------------------------------------
-    # Check Gemini
-    # --------------------------------------------------------
-
-    if not GEMINI_API_KEY or not ai_client:
+    if not ai_client:
 
         await message.answer(
-
-            "⚠️ **Gemini AI አልተዘጋጀም።**\n\n"
-
-            "Render → Environment Variables ላይ\n"
-            "`GEMINI_API_KEY` መኖሩን ያረጋግጡ።",
-
-            parse_mode="Markdown",
+            "⚠️ Gemini AI አልተዘጋጀም።"
         )
 
         return
-
-
-    # --------------------------------------------------------
-    # Get prompt
-    # --------------------------------------------------------
 
     prompt = (
         message.text or ""
     ).strip()
 
-
     if not prompt:
 
         await message.answer(
-            "⚠️ እባክዎ ጥያቄ ያስገቡ።"
+            "⚠️ ጥያቄ ያስገቡ።"
         )
 
         return
 
-
-    # --------------------------------------------------------
-    # Typing indicator
-    # --------------------------------------------------------
-
-    try:
-
-        await bot.send_chat_action(
-            chat_id=message.chat.id,
-            action="typing"
-        )
-
-    except Exception:
-        pass
-
-
-    # --------------------------------------------------------
-    # Gemini instruction
-    # --------------------------------------------------------
-
     system_instruction = (
-
         "You are Digital Pro Ads AI Assistant. "
-
-        "Answer naturally, accurately and helpfully. "
-
-        "If the user writes in Amharic, answer in Amharic. "
-
-        "If the user writes in English, answer in English. "
-
-        "If the user mixes Amharic and English, "
-        "respond naturally using the same style. "
-
-        "You can help with business ideas, advertising, "
-        "marketing, technology, coding, writing, "
-        "social media and general questions. "
-
-        "Keep answers clear and useful."
+        "Answer naturally and accurately. "
+        "If the user writes Amharic, answer Amharic. "
+        "If English, answer English. "
+        "If mixed, respond naturally. "
+        "Help with business, advertising, marketing, "
+        "technology, coding and general questions."
     )
 
-
-    # --------------------------------------------------------
-    # Try main + fallback model
-    # --------------------------------------------------------
-
-    models_to_try = [
-
-        GEMINI_MODEL,
-
-        GEMINI_FALLBACK_MODEL,
-
-    ]
-
+    full_prompt = (
+        f"{system_instruction}\n\n"
+        f"User:\n{prompt}"
+    )
 
     answer = None
 
-
-    for model_name in models_to_try:
+    for model_name in [
+        GEMINI_MODEL,
+        GEMINI_FALLBACK_MODEL
+    ]:
 
         try:
-
-            print(
-                f"Trying Gemini model: {model_name}"
-            )
 
             response = await asyncio.to_thread(
 
@@ -468,105 +1587,45 @@ async def ai_chat_response(
 
                 model=model_name,
 
-                contents=prompt,
-
-                config={
-                    "system_instruction":
-                        system_instruction
-                },
+                contents=full_prompt
             )
-
 
             if response and response.text:
 
-                answer = (
-                    response.text
-                    .strip()
-                )
-
-                print(
-                    f"Gemini success: {model_name}"
-                )
+                answer = response.text.strip()
 
                 break
-
-
-            print(
-                f"Gemini returned empty response: "
-                f"{model_name}"
-            )
-
 
         except Exception as e:
 
             print(
-                "================================"
-            )
-
-            print(
-                f"Gemini ERROR - {model_name}"
-            )
-
-            print(
-                "Error type:",
-                type(e).__name__
-            )
-
-            print(
-                "Error:",
+                f"Gemini error {model_name}:",
+                type(e).__name__,
                 str(e)
             )
-
-            traceback.print_exc()
-
-            print(
-                "================================"
-            )
-
-            await asyncio.sleep(1)
-
-
-    # --------------------------------------------------------
-    # No response
-    # --------------------------------------------------------
 
     if not answer:
 
         await message.answer(
-
-            "⚠️ **AI ምላሽ ማግኘት አልተቻለም።**\n\n"
-
-            "Gemini API Key፣ API access፣ model access "
-            "ወይም quota ላይ ችግር ሊኖር ይችላል።\n\n"
-
-            "Render Logs ውስጥ የGemini ERROR ይመልከቱ።",
-
-            parse_mode="Markdown",
+            "⚠️ AI ምላሽ ማግኘት አልተቻለም። "
+            "Gemini quota/API access ያረጋግጡ።"
         )
 
         return
 
+    for i in range(
+        0,
+        len(answer),
+        4000
+    ):
 
-    # --------------------------------------------------------
-    # Send answer
-    # --------------------------------------------------------
-
-    for part in split_telegram_text(answer):
-
-        try:
-
-            await message.answer(part)
-
-        except Exception as e:
-
-            print(
-                "Telegram AI response send error:",
-                e
-            )
+        await message.answer(
+            answer[i:i + 4000]
+        )
 
 
 # ============================================================
-# 💳 DEPOSIT
+# DEPOSIT
 # ============================================================
 
 @dp.message(F.text == "💳 Deposit")
@@ -577,81 +1636,58 @@ async def deposit_handler(
     if crypto is None:
 
         await message.answer(
-
-            "⚠️ **Crypto Deposit አሁን አይገኝም።**\n\n"
-
-            "Render → Environment Variables ላይ "
-            "`CRYPTO_TOKEN` ያስገቡ።",
-
-            parse_mode="Markdown",
+            "⚠️ CryptoPay አልተዘጋጀም።"
         )
 
         return
 
-
     try:
 
         invoice = await crypto.create_invoice(
-
             asset="USDT",
-
-            amount=1.0,
-
+            amount=1.0
         )
 
-
-        pay_keyboard = InlineKeyboardMarkup(
+        keyboard = InlineKeyboardMarkup(
 
             inline_keyboard=[
 
                 [
                     InlineKeyboardButton(
-
                         text="💳 Pay 1.00 USDT",
-
-                        url=invoice.bot_invoice_url,
-
+                        url=invoice.bot_invoice_url
                     )
                 ],
 
                 [
                     InlineKeyboardButton(
-
                         text="🔄 Verify Payment",
-
                         callback_data=(
                             f"verify_pay:"
                             f"{invoice.invoice_id}:1.0"
-                        ),
-
+                        )
                     )
-                ],
+                ]
 
             ]
         )
 
-
         await message.answer(
 
-            "💳 **Crypto Deposit (USDT)**\n\n"
-
-            "ወደ ሂሳብዎ **1.00 USDT** "
-            "ለመጨመር ከታች ያለውን "
+            "💳 **Crypto Deposit**\n\n"
+            "1.00 USDT ለመጨመር "
             "**Pay 1.00 USDT** ይጫኑ።\n\n"
-
-            "ክፍያውን ከፈጸሙ በኋላ "
+            "ከከፈሉ በኋላ "
             "**Verify Payment** ይጫኑ።",
 
-            reply_markup=pay_keyboard,
-
-            parse_mode="Markdown",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
         )
-
 
     except Exception as e:
 
         print(
-            "Crypto invoice error:",
+            "Deposit error:",
             type(e).__name__,
             str(e)
         )
@@ -662,7 +1698,7 @@ async def deposit_handler(
 
 
 # ============================================================
-# 💳 VERIFY PAYMENT
+# VERIFY PAYMENT
 # ============================================================
 
 @dp.callback_query(
@@ -675,124 +1711,89 @@ async def check_payment_status(
     if crypto is None:
 
         await callback.answer(
-            "Crypto service አይገኝም።",
+            "CryptoPay unavailable.",
             show_alert=True
         )
 
         return
 
-
     try:
 
         parts = callback.data.split(":")
 
-        if len(parts) != 3:
-
-            await callback.answer(
-                "Invalid payment data.",
-                show_alert=True
-            )
-
-            return
-
-
-        _,
-        invoice_id,
-        amount = parts
-
-
-        invoice_id_int = int(invoice_id)
-
-        amount_float = float(amount)
-
-
-        # ----------------------------------------------------
-        # Prevent duplicate payment credit
-        # ----------------------------------------------------
-
-        if invoice_id_int in processed_invoices:
-
-            await callback.answer(
-                "ይህ ክፍያ አስቀድሞ ተቆጥሯል።",
-                show_alert=True
-            )
-
-            return
-
-
-        invoices = await crypto.get_invoices(
-
-            invoice_ids=[
-                invoice_id_int
-            ]
-
+        invoice_id = int(
+            parts[1]
         )
 
+        if invoice_id in processed_invoices:
+
+            await callback.answer(
+                "Payment already credited.",
+                show_alert=True
+            )
+
+            return
+
+        invoices = await crypto.get_invoices(
+            invoice_ids=[
+                invoice_id
+            ]
+        )
 
         if not invoices:
 
             await callback.answer(
-                "Invoice አልተገኘም።",
+                "Invoice not found.",
                 show_alert=True
             )
 
             return
 
-
         invoice = invoices[0]
 
-
-        if invoice.status == "paid":
-
-            await update_user_balance(
-
-                callback.from_user.id,
-
-                amount_float
-
-            )
-
-
-            processed_invoices.add(
-                invoice_id_int
-            )
-
-
-            try:
-
-                await callback.message.edit_reply_markup(
-                    reply_markup=None
-                )
-
-            except Exception:
-                pass
-
-
-            await callback.message.answer(
-
-                f"✅ **ክፍያዎ ተረጋግጧል!**\n\n"
-
-                f"💵 **{amount_float:.2f} USDT** "
-                "ወደ ሂሳብዎ ተጨምሯል።",
-
-                parse_mode="Markdown",
-            )
-
+        if invoice.status != "paid":
 
             await callback.answer(
-                "Payment verified!"
-            )
-
-
-        else:
-
-            await callback.answer(
-
-                "❌ ክፍያው ገና አልተጠናቀቀም።",
-
+                "❌ Payment not completed yet.",
                 show_alert=True
             )
 
+            return
+
+        actual_amount = float(
+            invoice.amount
+        )
+
+        await update_user_balance(
+            callback.from_user.id,
+            actual_amount
+        )
+
+        processed_invoices.add(
+            invoice_id
+        )
+
+        try:
+
+            await callback.message.edit_reply_markup(
+                reply_markup=None
+            )
+
+        except Exception:
+            pass
+
+        await callback.message.answer(
+
+            f"✅ **Payment verified!**\n\n"
+            f"💵 **{actual_amount:.2f} USDT** "
+            f"added to your balance.",
+
+            parse_mode="Markdown"
+        )
+
+        await callback.answer(
+            "Payment verified!"
+        )
 
     except Exception as e:
 
@@ -803,13 +1804,13 @@ async def check_payment_status(
         )
 
         await callback.answer(
-            "⚠️ Payment verification failed.",
+            "Payment verification failed.",
             show_alert=True
         )
 
 
 # ============================================================
-# 🏧 WITHDRAW START
+# WITHDRAW
 # ============================================================
 
 @dp.message(F.text == "🏧 Withdraw")
@@ -822,42 +1823,31 @@ async def withdraw_start(
         message.from_user.id
     )
 
-
     if balance < MIN_WITHDRAW:
 
         await message.answer(
 
-            f"⚠️ **ዝቅተኛው ማውጣት "
-            f"የሚቻለው {MIN_WITHDRAW:.2f} USDT ነው።**\n\n"
+            f"⚠️ Minimum withdrawal: "
+            f"**{MIN_WITHDRAW:.2f} USDT**\n\n"
+            f"Balance: **{balance:.2f} USDT**",
 
-            f"የእርስዎ ቀሪ ሂሳብ፦ "
-            f"**{balance:.2f} USDT**",
-
-            parse_mode="Markdown",
+            parse_mode="Markdown"
         )
 
         return
-
 
     await state.set_state(
         BotStates.waiting_for_withdraw_amount
     )
 
-
     await message.answer(
 
-        f"🏧 **ገንዘብ ማውጫ**\n\n"
+        f"🏧 Withdrawal\n\n"
+        f"Balance: **{balance:.2f} USDT**\n\n"
+        f"Amount to withdraw "
+        f"(minimum {MIN_WITHDRAW:.2f}):",
 
-        f"ቀሪ ሂሳብዎ፦ "
-        f"**{balance:.2f} USDT**\n\n"
-
-        f"ማውጣት የሚፈልጉትን "
-        f"መጠን ያስገቡ፦\n"
-
-        f"(ዝቅተኛው "
-        f"{MIN_WITHDRAW:.2f} USDT)",
-
-        parse_mode="Markdown",
+        parse_mode="Markdown"
     )
 
 
@@ -879,69 +1869,45 @@ async def process_withdraw_amount(
             message.text.strip()
         )
 
-    except (
-        ValueError,
-        AttributeError
-    ):
+    except Exception:
 
         await message.answer(
-            "❌ እባክዎ ትክክለኛ "
-            "የቁጥር መጠን ያስገቡ።"
+            "❌ ትክክለኛ ቁጥር ያስገቡ።"
         )
 
         return
-
 
     balance = await get_user_balance(
         message.from_user.id
     )
 
-
     if amount < MIN_WITHDRAW:
 
         await message.answer(
-
-            f"❌ ዝቅተኛው "
-            f"**{MIN_WITHDRAW:.2f} USDT** ነው።",
-
-            parse_mode="Markdown",
+            f"❌ Minimum: {MIN_WITHDRAW:.2f} USDT"
         )
 
         return
-
 
     if amount > balance:
 
         await message.answer(
-
-            f"❌ በቂ ቀሪ ሂሳብ የለዎትም።\n\n"
-
-            f"ያለዎት፦ "
-            f"**{balance:.2f} USDT**",
-
-            parse_mode="Markdown",
+            f"❌ Balance: {balance:.2f} USDT"
         )
 
         return
-
 
     await state.update_data(
         withdraw_amount=amount
     )
 
-
     await state.set_state(
         BotStates.waiting_for_withdraw_wallet
     )
 
-
     await message.answer(
-
-        "📝 ገንዘቡ እንዲላክበት "
-        "የሚፈልጉትን **USDT Wallet Address** "
-        "ወይም **@CryptoBot Username** ያስገቡ፦",
-
-        parse_mode="Markdown",
+        "📍 USDT Wallet Address "
+        "ወይም @CryptoBot Username ያስገቡ።"
     )
 
 
@@ -961,7 +1927,6 @@ async def process_withdraw_wallet(
         message.text or ""
     ).strip()
 
-
     if not wallet:
 
         await message.answer(
@@ -969,7 +1934,6 @@ async def process_withdraw_wallet(
         )
 
         return
-
 
     data = await state.get_data()
 
@@ -979,103 +1943,101 @@ async def process_withdraw_wallet(
 
     user_id = message.from_user.id
 
-
     if not amount:
 
         await state.clear()
 
         await message.answer(
-            "⚠️ Withdrawal session አልተገኘም።"
+            "⚠️ Withdrawal session expired."
         )
 
         return
-
 
     deducted = await deduct_user_balance(
         user_id,
         amount
     )
 
-
     if not deducted:
 
         await state.clear()
 
         await message.answer(
-            "⚠️ ክፍያውን መፈጸም አልተቻለም።"
+            "⚠️ Withdrawal failed."
         )
 
         return
 
+    try:
 
-    await create_withdrawal(
-        user_id,
-        amount,
-        wallet
-    )
+        await create_withdrawal(
+            user_id,
+            amount,
+            wallet
+        )
 
+    except Exception as e:
+
+        print(
+            "Withdrawal save error:",
+            e
+        )
+
+        try:
+
+            await update_user_balance(
+                user_id,
+                amount
+            )
+
+        except Exception:
+            pass
+
+        await state.clear()
+
+        await message.answer(
+            "⚠️ Withdrawal failed. Balance refunded."
+        )
+
+        return
 
     await state.clear()
 
-
     await message.answer(
 
-        f"✅ **የማውጣት ጥያቄዎ ተልኳል!**\n\n"
-
-        f"💵 መጠን፦ "
-        f"**{amount:.2f} USDT**\n"
-
-        f"📍 አድራሻ፦ `{wallet}`\n\n"
-
-        "አስተዳዳሪው ክፍያውን "
-        "አረጋግጦ ይልክልዎታል።",
+        f"✅ **Withdrawal request submitted!**\n\n"
+        f"💵 {amount:.2f} USDT\n"
+        f"📍 `{wallet}`",
 
         reply_markup=main_menu,
-
-        parse_mode="Markdown",
+        parse_mode="Markdown"
     )
-
-
-    # --------------------------------------------------------
-    # Notify admin
-    # --------------------------------------------------------
 
     try:
 
         await bot.send_message(
 
-            chat_id=ADMIN_ID,
+            ADMIN_ID,
 
-            text=(
-
-                f"🚨 **አዲስ የማውጣት ጥያቄ**\n\n"
-
-                f"👤 ተጠቃሚ፦ "
-                f"{message.from_user.first_name} "
-                f"(`{user_id}`)\n"
-
-                f"💵 መጠን፦ "
-                f"**{amount:.2f} USDT**\n"
-
-                f"📍 አድራሻ፦ "
-                f"`{wallet}`"
-
-            ),
-
-            parse_mode="Markdown",
+            (
+                "🚨 New Withdrawal\n\n"
+                f"User: {message.from_user.first_name}\n"
+                f"ID: {user_id}\n"
+                f"Amount: {amount:.2f} USDT\n"
+                f"Wallet: {wallet}"
+            )
         )
-
 
     except Exception as e:
 
         print(
-            "Error alerting admin:",
+            "Admin notification error:",
             e
         )
 
 
 # ============================================================
-# ➕ ADD CHANNEL
+# ADD CHANNEL
 # ============================================================
 
 @dp.message(F.text == "➕ Add Channel")
@@ -1088,17 +2050,14 @@ async def register_channel_start(
         BotStates.waiting_for_channel
     )
 
-
     await message.answer(
 
-        "📌 **ቻናልዎን ለመመዝገብ፦**\n\n"
+        "📌 **Add Channel**\n\n"
+        "1. Bot-ን ወደ channel ያስገቡ።\n"
+        "2. Admin ያድርጉት።\n"
+        "3. @channel_username ይላኩ።",
 
-        "1. ቦቱን ወደ ቻናልዎ ያስገቡ።\n"
-        "2. **Admin** ያድርጉት።\n"
-        "3. የቻናልዎን Username "
-        "(ለምሳሌ `@my_channel`) ይላኩ።",
-
-        parse_mode="Markdown",
+        parse_mode="Markdown"
     )
 
 
@@ -1114,40 +2073,34 @@ async def process_channel_username(
     state: FSMContext
 ):
 
-    channel_username = (
+    username = (
         message.text or ""
     ).strip()
 
+    if not username:
 
-    if not channel_username:
         await message.answer(
             "❌ Channel username ያስገቡ።"
         )
+
         return
 
+    if not username.startswith("@"):
 
-    if not channel_username.startswith("@"):
-
-        channel_username = (
-            "@" + channel_username
-        )
-
+        username = "@" + username
 
     try:
 
         chat = await bot.get_chat(
-            channel_username
+            username
         )
 
-
         me = await bot.get_me()
-
 
         member = await bot.get_chat_member(
             chat.id,
             me.id
         )
-
 
         if member.status not in [
             "administrator",
@@ -1155,71 +2108,52 @@ async def process_channel_username(
         ]:
 
             await message.answer(
-
-                "❌ እባክዎ መጀመሪያ "
-                "ቦቱን በቻናሉ ላይ "
-                "Admin ያድርጉት!"
-
+                "❌ Bot-ን Admin ያድርጉት።"
             )
 
             return
 
-
         success = await add_channel(
-
             message.from_user.id,
-
-            channel_username,
-
-            chat.title,
+            username,
+            chat.title
         )
 
+        await state.clear()
 
         if success:
 
             await message.answer(
 
                 f"✅ **{chat.title}** "
-                f"({channel_username}) "
-                "በተሳካ ሁኔታ ተመዝግቧል!",
+                f"ተመዝግቧል።",
 
                 reply_markup=main_menu,
-
-                parse_mode="Markdown",
+                parse_mode="Markdown"
             )
 
         else:
 
             await message.answer(
-                "⚠️ ይህ ቻናል "
-                "አስቀድሞ ተመዝግቧል።"
+                "⚠️ Channel አስቀድሞ ተመዝግቧል።",
+                reply_markup=main_menu
             )
-
-
-        await state.clear()
-
 
     except Exception as e:
 
         print(
-            "Channel registration error:",
+            "Channel error:",
             type(e).__name__,
             str(e)
         )
 
-
         await message.answer(
-
-            "❌ ቻናሉን ማግኘት አልተቻለም።\n\n"
-
-            "Username ትክክል መሆኑንና "
-            "ቦቱ Admin መደረጉን ያረጋግጡ።"
-
+            "❌ Channel ማግኘት አልተቻለም።"
         )
 
 
 # ============================================================
-# 📢 ADVERTISE
+# ADVERTISE
 # ============================================================
 
 @dp.message(F.text == "📢 Advertise")
@@ -1229,65 +2163,41 @@ async def choose_channel_to_advertise(
 
     channels = await get_all_channels()
 
-
     if not channels:
 
         await message.answer(
-
-            "⚠️ የተመዘገበ ቻናል የለም።\n\n"
-
-            "በ **➕ Add Channel** "
-            "የራስዎን ቻናል ይመዝግቡ።",
-
-            parse_mode="Markdown",
+            "⚠️ የተመዘገበ Channel የለም።"
         )
 
         return
 
-
     keyboard = []
-
 
     for username, title in channels:
 
         keyboard.append(
 
             [
-
                 InlineKeyboardButton(
-
-                    text=(
-                        f"📢 {title} "
-                        f"({username})"
-                    ),
-
-                    callback_data=(
-                        f"adto:{username}"
-                    ),
+                    text=f"📢 {title}",
+                    callback_data=f"adto:{username}"
                 )
-
             ]
 
         )
 
-
-    markup = InlineKeyboardMarkup(
-        inline_keyboard=keyboard
-    )
-
-
     await message.answer(
 
-        "🎯 ማስታወቂያዎ "
-        "እንዲለጠፍበት የሚፈልጉትን "
-        "ቻናል ይምረጡ፦",
+        "🎯 ማስታወቂያ የሚለጠፍበትን Channel ይምረጡ።",
 
-        reply_markup=markup,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=keyboard
+        )
     )
 
 
 # ============================================================
-# SELECT TARGET CHANNEL
+# SELECT AD CHANNEL
 # ============================================================
 
 @dp.callback_query(
@@ -1298,36 +2208,27 @@ async def target_channel_selected(
     state: FSMContext
 ):
 
-    target_channel = (
-        callback.data.split(
-            ":",
-            1
-        )[1]
-    )
-
+    target_channel = callback.data.split(
+        ":",
+        1
+    )[1]
 
     await state.update_data(
         target_channel=target_channel
     )
 
-
     await state.set_state(
         BotStates.waiting_for_ad_text
     )
 
-
     await callback.message.answer(
 
         f"📝 ወደ **{target_channel}** "
-        "የሚለጠፈውን "
-        "የማስታወቂያ ጽሑፍ ይላኩ።\n\n"
+        f"የሚለጠፈውን ማስታወቂያ ይላኩ።\n\n"
+        f"💰 Price: **{AD_PRICE:.2f} USDT**",
 
-        f"💰 የአንድ ማስታወቂያ ዋጋ "
-        f"**{AD_PRICE:.2f} USDT** ነው።",
-
-        parse_mode="Markdown",
+        parse_mode="Markdown"
     )
-
 
     await callback.answer()
 
@@ -1346,20 +2247,17 @@ async def process_ad_submission(
 
     user_id = message.from_user.id
 
-
     ad_content = (
         message.text or ""
     ).strip()
 
-
     if not ad_content:
 
         await message.answer(
-            "❌ የማስታወቂያ ጽሑፍ ያስገቡ።"
+            "❌ Advertisement text ያስገቡ።"
         )
 
         return
-
 
     data = await state.get_data()
 
@@ -1367,97 +2265,56 @@ async def process_ad_submission(
         "target_channel"
     )
 
-
     if not target_channel:
 
         await state.clear()
 
         await message.answer(
-            "⚠️ የቻናል session አልተገኘም።"
+            "⚠️ Channel session አልተገኘም።"
         )
 
         return
-
 
     balance = await get_user_balance(
         user_id
     )
 
-
     if balance < AD_PRICE:
 
         await state.clear()
 
-
-        deposit_button = InlineKeyboardMarkup(
-
-            inline_keyboard=[
-
-                [
-
-                    InlineKeyboardButton(
-
-                        text="💳 Deposit",
-
-                        callback_data=(
-                            "go_to_deposit"
-                        ),
-
-                    )
-
-                ]
-
-            ]
-
-        )
-
-
         await message.answer(
 
-            f"❌ **ቀሪ ሂሳብዎ "
-            f"በቂ አይደለም!**\n\n"
+            f"❌ Balance በቂ አይደለም።\n\n"
+            f"Price: {AD_PRICE:.2f} USDT\n"
+            f"Balance: {balance:.2f} USDT",
 
-            f"ዋጋ፦ "
-            f"**{AD_PRICE:.2f} USDT**\n"
-
-            f"ቀሪ ሂሳብ፦ "
-            f"**{balance:.2f} USDT**",
-
-            reply_markup=deposit_button,
-
-            parse_mode="Markdown",
+            parse_mode="Markdown"
         )
 
         return
-
 
     deducted = await deduct_user_balance(
         user_id,
         AD_PRICE
     )
 
-
     if not deducted:
 
         await state.clear()
 
         await message.answer(
-            "⚠️ ክፍያውን መፈጸም አልተቻለም።"
+            "⚠️ Balance deduction failed."
         )
 
         return
 
-
     try:
 
         await save_ad(
-
             user_id,
-
             target_channel,
-
             ad_content
-
         )
 
     except Exception as e:
@@ -1468,63 +2325,45 @@ async def process_ad_submission(
             str(e)
         )
 
-        await message.answer(
-            "⚠️ ማስታወቂያውን ማስቀመጥ "
-            "አልተቻለም። Admin ያግኙ።"
-        )
+        # Refund
+        try:
+
+            await update_user_balance(
+                user_id,
+                AD_PRICE
+            )
+
+        except Exception:
+            pass
 
         await state.clear()
 
+        await message.answer(
+            "⚠️ Ad save failed. Balance refunded."
+        )
+
         return
 
-
     await state.clear()
-
 
     new_balance = await get_user_balance(
         user_id
     )
 
-
     await message.answer(
 
-        f"✅ **ማስታወቂያዎ ተመዝግቧል!**\n\n"
-
-        f"💰 የተቆረጠ፦ "
-        f"**{AD_PRICE:.2f} USDT**\n"
-
-        f"💳 አዲሱ ቀሪ ሂሳብ፦ "
-        f"**{new_balance:.2f} USDT**\n\n"
-
-        f"🎯 ቻናል፦ "
-        f"**{target_channel}**",
+        f"✅ **Advertisement submitted!**\n\n"
+        f"💵 Charged: {AD_PRICE:.2f} USDT\n"
+        f"💰 Balance: {new_balance:.2f} USDT\n"
+        f"🎯 Channel: {target_channel}",
 
         reply_markup=main_menu,
-
-        parse_mode="Markdown",
+        parse_mode="Markdown"
     )
 
 
 # ============================================================
-# GO TO DEPOSIT
-# ============================================================
-
-@dp.callback_query(
-    F.data == "go_to_deposit"
-)
-async def forward_to_deposit(
-    callback: types.CallbackQuery
-):
-
-    await callback.answer()
-
-    await deposit_handler(
-        callback.message
-    )
-
-
-# ============================================================
-# 📊 MY ADS
+# MY ADS
 # ============================================================
 
 @dp.message(F.text == "📊 My Ads")
@@ -1534,44 +2373,39 @@ async def my_ads_handler(
 
     ads = await get_active_ads()
 
-
     if not ads:
 
         await message.answer(
-            "📊 በአሁኑ ወቅት "
-            "ንቁ የሆነ ማስታወቂያ "
-            "የለዎትም።"
+            "📊 Active ads የሉም።"
         )
 
         return
 
-
     text_msg = (
-        "📊 **ንቁ ማስታወቂያዎች፦**\n\n"
+        "📊 **Active Ads**\n\n"
     )
 
-
-    for i, (channel, text) in enumerate(
+    for i, (
+        channel,
+        text
+    ) in enumerate(
         ads[:5],
         start=1
     ):
 
-        clean_preview = (
+        preview = (
             text[:50]
-            + ("..." if len(text) > 50 else "")
+            + (
+                "..."
+                if len(text) > 50
+                else ""
+            )
         )
-
 
         text_msg += (
-
-            f"{i}. 🎯 **ቻናል፦** "
-            f"{channel}\n"
-
-            f"📝 **ጽሑፍ፦** "
-            f"{clean_preview}\n\n"
-
+            f"{i}. 🎯 {channel}\n"
+            f"📝 {preview}\n\n"
         )
-
 
     await message.answer(
         text_msg,
@@ -1580,7 +2414,7 @@ async def my_ads_handler(
 
 
 # ============================================================
-# AUTO AD POSTER
+# AUTO POST ADS
 # ============================================================
 
 async def post_ads_to_channels():
@@ -1588,7 +2422,6 @@ async def post_ads_to_channels():
     print(
         "Running automatic ad poster..."
     )
-
 
     try:
 
@@ -1598,12 +2431,10 @@ async def post_ads_to_channels():
 
         print(
             "Could not get ads:",
-            type(e).__name__,
-            str(e)
+            e
         )
 
         return
-
 
     for target_channel, text in ads:
 
@@ -1616,12 +2447,10 @@ async def post_ads_to_channels():
                 text=(
                     "📢 Sponsored Ad\n\n"
                     f"{text}"
-                ),
-
+                )
             )
 
             await asyncio.sleep(5)
-
 
         except Exception as e:
 
@@ -1634,7 +2463,7 @@ async def post_ads_to_channels():
 
 
 # ============================================================
-# 💰 BALANCE
+# BALANCE
 # ============================================================
 
 @dp.message(F.text == "💰 Balance")
@@ -1646,18 +2475,17 @@ async def balance_handler(
         message.from_user.id
     )
 
-
     await message.answer(
 
-        f"💰 ቀሪ ሂሳብዎ፦ "
-        f"**{balance:.2f} USDT**",
+        f"💰 **Balance:** "
+        f"{balance:.2f} USDT",
 
-        parse_mode="Markdown",
+        parse_mode="Markdown"
     )
 
 
 # ============================================================
-# 👥 REFERRAL
+# REFERRAL
 # ============================================================
 
 @dp.message(F.text == "👥 Referral")
@@ -1667,21 +2495,19 @@ async def referral_handler(
 
     bot_info = await bot.get_me()
 
-
-    ref_link = (
+    link = (
         f"https://t.me/"
         f"{bot_info.username}"
         f"?start="
         f"{message.from_user.id}"
     )
 
-
     await message.answer(
 
-        "👥 **የመጋበዣ ሊንክዎ፦**\n\n"
-        f"`{ref_link}`",
+        "👥 **Referral Link**\n\n"
+        f"`{link}`",
 
-        parse_mode="Markdown",
+        parse_mode="Markdown"
     )
 
 
@@ -1693,23 +2519,57 @@ async def run_bot():
 
     await init_db()
 
+    # --------------------------------------------------------
+    # Telegram Mini App Menu Button
+    # --------------------------------------------------------
+
+    if WEBAPP_URL:
+
+        try:
+
+            await bot.set_chat_menu_button(
+
+                menu_button=types.MenuButtonWebApp(
+
+                    text="📱 Mini App",
+
+                    web_app=types.WebAppInfo(
+                        url=WEBAPP_URL
+                    )
+                )
+            )
+
+            print(
+                "Telegram Mini App menu button: ENABLED"
+            )
+
+        except Exception as e:
+
+            print(
+                "Mini App menu button error:",
+                type(e).__name__,
+                str(e)
+            )
+
+    else:
+
+        print(
+            "WEBAPP_URL missing - Mini App button disabled"
+        )
+
+    # --------------------------------------------------------
+    # Scheduler
+    # --------------------------------------------------------
 
     scheduler = AsyncIOScheduler()
 
-
     scheduler.add_job(
-
         post_ads_to_channels,
-
         "interval",
-
-        hours=8,
-
+        hours=8
     )
 
-
     scheduler.start()
-
 
     print(
         "===================================="
@@ -1723,38 +2583,28 @@ async def run_bot():
         f"Gemini model: {GEMINI_MODEL}"
     )
 
-    if GEMINI_API_KEY:
+    print(
+        "Gemini AI:",
+        "ENABLED" if ai_client else "DISABLED"
+    )
 
-        print(
-            "Gemini AI: ENABLED"
-        )
+    print(
+        "CryptoPay:",
+        "ENABLED" if crypto else "DISABLED"
+    )
 
-    else:
-
-        print(
-            "Gemini AI: DISABLED"
-        )
-
-
-    if CRYPTO_TOKEN:
-
-        print(
-            "CryptoPay: ENABLED"
-        )
-
-    else:
-
-        print(
-            "CryptoPay: DISABLED"
-        )
-
+    print(
+        "Mini App:",
+        "ENABLED" if WEBAPP_URL else "DISABLED"
+    )
 
     print(
         "===================================="
     )
 
-
-    await dp.start_polling(bot)
+    await dp.start_polling(
+        bot
+    )
 
 
 # ============================================================
@@ -1767,9 +2617,7 @@ async def main():
         "Starting Digital Pro Ads..."
     )
 
-
     await start_web_server()
-
 
     await run_bot()
 
@@ -1782,7 +2630,9 @@ if __name__ == "__main__":
 
     try:
 
-        asyncio.run(main())
+        asyncio.run(
+            main()
+        )
 
     except KeyboardInterrupt:
 
