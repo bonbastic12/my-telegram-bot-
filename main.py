@@ -106,19 +106,24 @@ async def ai_chat_response(message: types.Message):
         return
 
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    try:
-        response = await asyncio.to_thread(
-            ai_client.models.generate_content,
-            model="gemini-3.8-flash",
-            contents=message.text
-        )
-        if response and response.text:
-            await message.answer(response.text)
-        else:
-            await message.answer("⚠️ ምንም መልስ ማመንጨት አልተቻለም።")
-    except Exception as e:
-        print(f"AI Error: {e}")
-        await message.answer(f"❌ ስህተት ተፈጥሯል፦ {e}")
+    
+    # መጀመሪያ 3.8 Flash ይሞክራል፤ በጎግል በኩል 503 ጫና ካለ ወደ 2.5 Flash ይቀይራል
+    models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash"]
+    for model_name in models_to_try:
+        try:
+            response = await asyncio.to_thread(
+                ai_client.models.generate_content,
+                model=model_name,
+                contents=message.text
+            )
+            if response and response.text:
+                await message.answer(response.text)
+                return
+        except Exception as e:
+            print(f"Error on {model_name}: {e}")
+            continue
+
+    await message.answer("❌ በአሁኑ ሰዓት በ AI ሰርቨር ላይ ከፍተኛ ጫና ስላለ ምላሽ መስጠት አልተቻለም። እባክዎ ጥቂት ቆይተው እንደገና ይሞክሩ።")
 
 # ----------------- 💳 DEPOSIT (CRYPTO PAY) -----------------
 @dp.message(F.text == "💳 Deposit")
