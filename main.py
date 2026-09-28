@@ -9,12 +9,13 @@ from aiogram.fsm.state import State, StatesGroup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiocryptopay import AioCryptoPay, Networks
 from database import (
-    init_db, add_user, get_user_balance, update_user_balance,
+    init_db, add_user, get_user_balance, update_user_balance, deduct_user_balance,
     add_channel, get_all_channels, save_ad, get_active_ads
 )
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CRYPTO_TOKEN = "639734:AAyANr5PBtEHPO5344cjssr6BQ5yGI6I7jA"
+AD_PRICE = 1.00  # የአንድ ማስታወቂያ ክፍያ በ USDT
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -67,7 +68,6 @@ async def start_handler(message: types.Message, command: CommandObject):
 # ----------------- 💳 DEPOSIT (CRYPTO PAY) -----------------
 @dp.message(F.text == "💳 Deposit")
 async def deposit_handler(message: types.Message):
-    # መነሻ የ $1.00 USDT ኢንቮይስ ያዘጋጃል
     invoice = await crypto.create_invoice(asset='USDT', amount=1.0)
     
     pay_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -130,7 +130,7 @@ async def process_channel_username(message: types.Message, state: FSMContext):
     except Exception:
         await message.answer("❌ ቻናሉን ማግኘት አልተቻለም። ስሙ ትክክል መሆኑንና ቦቱ Admin መደረጉን ያረጋግጡ።")
 
-# ----------------- 📢 ADVERTISE -----------------
+# ----------------- 📢 ADVERTISE (ክፍያ ማጣሪያ ያለው) -----------------
 @dp.message(F.text == "📢 Advertise")
 async def choose_channel_to_advertise(message: types.Message):
     channels = await get_all_channels()
@@ -150,22 +150,63 @@ async def target_channel_selected(callback: types.CallbackQuery, state: FSMConte
     target_channel = callback.data.split(":")[1]
     await state.update_data(target_channel=target_channel)
     await state.set_state(BotStates.waiting_for_ad_text)
-    await callback.message.answer(f"📝 ወደ **{target_channel}** የሚለጠፈውን የማስታወቂያ ጽሑፍ እዚህ ይላኩ፦", parse_mode="Markdown")
+    await callback.message.answer(
+        f"📝 ወደ **{target_channel}** የሚለጠፈውን የማስታወቂያ ጽሑፍ እዚህ ይላኩ፦\n\n"
+        f"*(ማስታወሻ፦ የአንድ ማስታወቂያ ዋጋ **{AD_PRICE:.2f} USDT** ሲሆን፣ ከሂሳብዎ ላይ በቀጥታ የሚቆረጥ ይሆናል።)*",
+        parse_mode="Markdown"
+    )
     await callback.answer()
 
 @dp.message(BotStates.waiting_for_ad_text)
 async def process_ad_submission(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    balance = await get_user_balance(user_id)
+
+    # 1. ሂሳብ ማረጋገጥ
+    if balance < AD_PRICE:
+        await state.clear()
+        deposit_button = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Deposit", callback_data="go_to_deposit")]
+        ])
+        await message.answer(
+            f"❌ **ቀሪ ሂሳብዎ በቂ አይደለም!**\n\n"
+            f"የአንድ ማስታወቂያ ዋጋ፦ **{AD_PRICE:.2f} USDT**\n"
+            f"የእርስዎ ቀሪ ሂሳብ፦ **{balance:.2f} USDT**\n\n"
+            "እባክዎ መጀመሪያ ሂሳብዎን ይሙሉ፦",
+            reply_markup=deposit_button,
+            parse_mode="Markdown"
+        )
+        return
+
+    # 2. ክፍያ መቀነስ
+    deducted = await deduct_user_balance(user_id, AD_PRICE)
+    if not deducted:
+        await state.clear()
+        await message.answer("⚠️ ክፍያውን መፈጸም አልተቻለም። እባክዎ ደግመው ይሞክሩ።")
+        return
+
+    # 3. ማስታወቂያ መመዝገብ
     data = await state.get_data()
     target_channel = data.get("target_channel")
     ad_content = message.text
 
-    await save_ad(message.from_user.id, target_channel, ad_content)
+    await save_ad(user_id, target_channel, ad_content)
     await state.clear()
+    
+    new_balance = await get_user_balance(user_id)
     await message.answer(
-        f"✅ ማስታወቂያዎ ተመዝግቧል!\nበቀን 3 ጊዜ ወደ **{target_channel}** በራስ-ሰር ይለጠፋል።",
+        f"✅ **ማስታወቂያዎ በተሳካ ሁኔታ ተመዝግቧል!**\n\n"
+        f"💰 የተቆረጠ ሂሳብ፦ **{AD_PRICE:.2f} USDT**\n"
+        f"💳 አዲሱ ቀሪ ሂሳብዎ፦ **{new_balance:.2f} USDT**\n\n"
+        f"በቀን 3 ጊዜ ወደ **{target_channel}** በራስ-ሰር ይለጠፋል።",
         reply_markup=main_menu,
         parse_mode="Markdown"
     )
+
+@dp.callback_query(F.data == "go_to_deposit")
+async def forward_to_deposit(callback: types.CallbackQuery):
+    await callback.answer()
+    await deposit_handler(callback.message)
 
 # ----------------- ራስ-ሰር ፖስተር (በየ 8 ሰዓቱ) -----------------
 async def post_ads_to_channels():
