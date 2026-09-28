@@ -42,9 +42,6 @@ ADMIN_ID = 6179388927
 AD_PRICE = 1.00
 MIN_WITHDRAW = 5.00
 
-# Gemini 3.8 Flash
-GEMINI_MODEL = "gemini-3.8-flash"
-
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is missing.")
 
@@ -89,7 +86,6 @@ async def start_web_server():
     runner = web.AppRunner(app)
     await runner.setup()
 
-    # Render ነባሪ ፖርት 10000 ወይም የተሰጠውን PORT ይጠቀማል
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
@@ -147,7 +143,7 @@ async def start_handler(message: types.Message, command: CommandObject):
 
 
 # ============================================================
-# 🤖 GEMINI 3.8 FLASH AI CHAT
+# 🤖 GEMINI 3.8 FLASH AI CHAT (የተዋሃደ ክፍል)
 # ============================================================
 @dp.message(F.text == "🤖 AI Chat")
 async def ai_chat_start(message: types.Message, state: FSMContext):
@@ -162,11 +158,8 @@ async def ai_chat_start(message: types.Message, state: FSMContext):
 
     await message.answer(
         "🤖 **የ AI ረዳት ክፍል**\n\n"
-        "የሚፈልጉትን ማንኛውንም ጥያቄ፣ "
-        "ለማስታወቂያ የሚሆን የጽሑፍ ሃሳብ ወይም "
-        "ማንኛውንም ርዕስ ይጠይቁኝ፦\n\n"
-        "🇪🇹 አማርኛ እና 🇬🇧 English ይደገፋሉ።\n\n"
-        "*(ለመውጣት '🔙 Back to Menu' የሚለውን ይጫኑ)*",
+        "ጥያቄዎን በአማርኛ ወይም English ይጻፉ።\n\n"
+        "ለመውጣት **🔙 Back to Menu** ይጫኑ።",
         reply_markup=cancel_btn,
         parse_mode="Markdown",
     )
@@ -178,8 +171,9 @@ async def ai_chat_start(message: types.Message, state: FSMContext):
 )
 async def ai_chat_exit(message: types.Message, state: FSMContext):
     await state.clear()
+
     await message.answer(
-        "ወደ ዋናው ሜኑ ተመልሰዋል፦",
+        "ወደ ዋናው ሜኑ ተመልሰዋል።",
         reply_markup=main_menu,
     )
 
@@ -187,20 +181,26 @@ async def ai_chat_exit(message: types.Message, state: FSMContext):
 def split_telegram_text(text: str, max_length: int = 4000):
     if not text:
         return []
-    return [text[i:i + max_length] for i in range(0, len(text), max_length)]
+    return [
+        text[i:i + max_length]
+        for i in range(0, len(text), max_length)
+    ]
 
 
 @dp.message(BotStates.waiting_for_ai_prompt)
-async def ai_chat_response(message: types.Message):
+async def ai_chat_response(
+    message: types.Message,
+    state: FSMContext,
+):
     if not GEMINI_API_KEY or not ai_client:
         await message.answer(
-            "⚠️ **GEMINI_API_KEY አልተገኘም።**\n\n"
-            "Render → Environment Variables ላይ `GEMINI_API_KEY` መግባቱን ያረጋግጡ።",
-            parse_mode="Markdown",
+            "⚠️ GEMINI_API_KEY አልተገኘም።\n\n"
+            "Render → Environment → GEMINI_API_KEY መግባቱን ያረጋግጡ።"
         )
         return
 
     prompt = (message.text or "").strip()
+
     if not prompt:
         await message.answer("⚠️ እባክዎ ጥያቄ ያስገቡ።")
         return
@@ -210,42 +210,53 @@ async def ai_chat_response(message: types.Message):
         action="typing",
     )
 
-    system_instruction = (
-        "You are Digital Pro Ads AI Assistant. "
-        "Help users clearly and accurately in Amharic or English. "
-        "If the user writes Amharic, answer in natural Amharic. "
-        "If the user writes English, answer in English. "
-        "If the user mixes Amharic and English, you may naturally use both. "
-        "Be concise unless the user asks for detailed information. "
-        "For advertising requests, provide practical, ready-to-use text."
+    gen_config = genai_types.GenerateContentConfig(
+        system_instruction=(
+            "You are Digital Pro Ads AI Assistant. "
+            "Answer naturally and accurately. "
+            "If the user writes Amharic, answer in Amharic. "
+            "If the user writes English, answer in English. "
+            "If the user mixes both languages, respond naturally. "
+            "Help with advertising, business, technology, "
+            "writing, coding and general questions."
+        ),
+        thinking_config=genai_types.ThinkingConfig(
+            thinking_level="low"
+        ),
     )
 
-    # 3.8 Flash ላይ ጫና ካጋጠመው 2.5 Flash ላይ እንዲሞክር
-    models_to_try = [GEMINI_MODEL, "gemini-2.5-flash"]
+    # 3.8 Flash ላይ ጫና (503 Error) ካለ ወደ 2.5 Flash ተቀይሮ እንዲሰራ ያደርጋል
+    models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash"]
     answer = None
 
-    for model_candidate in models_to_try:
+    for model_name in models_to_try:
         try:
             response = await asyncio.to_thread(
                 ai_client.models.generate_content,
-                model=model_candidate,
+                model=model_name,
                 contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                ),
+                config=gen_config,
             )
+
             if response and response.text:
                 answer = response.text.strip()
                 break
+
         except Exception as e:
-            print(f"Error with {model_candidate}: {e}")
+            print(f"Error on {model_name}: {e}")
             await asyncio.sleep(1)
 
     if not answer:
-        await message.answer("⚠️ ይቅርታ፣ በአሁኑ ሰዓት ምላሽ ማመንጨት አልተቻለም። እባክዎ ጥቂት ቆይተው እንደገና ይሞክሩ።")
+        print("========== GEMINI ERROR ==========")
+        traceback.print_exc()
+        print("==================================")
+        await message.answer(
+            "⚠️ **AI ጋር ለመገናኘት ችግር ተፈጥሯል።**\n\n"
+            "እባክዎ ጥቂት ሰከንዶች ቆይተው ይሞክሩ።",
+            parse_mode="Markdown",
+        )
         return
 
-    # ማስታወሻ፦ የMarkdown parsing error እንዳይመጣ ተራ ጽሑፍ (Plain text) አድርጎ ይልከዋል
     for part in split_telegram_text(answer):
         await message.answer(part)
 
@@ -569,18 +580,16 @@ async def forward_to_deposit(callback: types.CallbackQuery):
 
 
 # ============================================================
-# 📊 MY ADS (አዲስ የተጨመረ)
+# 📊 MY ADS
 # ============================================================
 @dp.message(F.text == "📊 My Ads")
 async def my_ads_handler(message: types.Message):
-    # ተጠቃሚው የለጠፋቸውን ንቁ ማስታወቂያዎች ያሳያል
     ads = await get_active_ads()
-    # ads ውስጥ (target_channel, ad_text) ይመጣል
     if not ads:
         await message.answer("📊 በአሁኑ ወቅት ንቁ የሆነ ማስታወቂያ የለዎትም።")
         return
 
-    text_msg = "📊 **ንቁ ማስታወቂያዎችዎ፦**\n\n"
+    text_msg = "📊 **ንቁ ማስታወቂያዎች፦**\n\n"
     for i, (channel, text) in enumerate(ads[:5], start=1):
         clean_preview = text[:50] + ("..." if len(text) > 50 else "")
         text_msg += f"{i}. 🎯 **ቻናል፦** {channel}\n📝 **ጽሑፍ፦** {clean_preview}\n\n"
@@ -596,7 +605,6 @@ async def post_ads_to_channels():
 
     for target_channel, text in ads:
         try:
-            # የማስታወቂያው ጽሑፍ ላይ ልዩ ምልክቶች ቢኖሩ ስህተት እንዳይፈጥር plain text ሆኖ ይለጠፋል
             await bot.send_message(
                 chat_id=target_channel,
                 text=f"📢 Sponsored Ad\n\n{text}"
@@ -629,7 +637,7 @@ async def referral_handler(message: types.Message):
 
 
 # ============================================================
-# RUN BOT
+# RUN BOT & ENTRY POINT
 # ============================================================
 async def run_bot():
     await init_db()
@@ -644,7 +652,7 @@ async def run_bot():
 
     print("ቦቱ ስራ ጀምሯል...")
     if GEMINI_API_KEY:
-        print(f"Gemini enabled: {GEMINI_MODEL}")
+        print("Gemini AI enabled!")
     else:
         print("WARNING: GEMINI_API_KEY is missing.")
 
@@ -653,11 +661,9 @@ async def run_bot():
 
 async def main():
     print("Starting Digital Pro Ads...")
-
-    # Start Render web server first
+    # Render Health check እንዲቀድም
     await start_web_server()
-
-    # Then start Telegram bot
+    # ቦቱን ያስጀምራል
     await run_bot()
 
 
