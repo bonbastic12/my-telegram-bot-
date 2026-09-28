@@ -3,3 +3,4 @@ aiosqlite
 aiohttp
 apscheduler
 aiocryptopay
+google-genai
