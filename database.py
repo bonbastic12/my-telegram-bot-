@@ -4,7 +4,6 @@ DB_NAME = "bot_database.db"
 
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
-        # የተጠቃሚዎች ዳታ
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -12,7 +11,6 @@ async def init_db():
                 balance REAL DEFAULT 0.0
             )
         """)
-        # የተመዘገቡ ዓለም አቀፍ ቻናሎች
         await db.execute("""
             CREATE TABLE IF NOT EXISTS channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -21,7 +19,6 @@ async def init_db():
                 title TEXT
             )
         """)
-        # የሚለጠፉ ማስታወቂያዎች
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ads (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +54,20 @@ async def get_user_balance(user_id: int):
         result = await cursor.fetchone()
         return result[0] if result else 0.0
 
-# አዲስ ቻናል መመዝገቢያ
+async def update_user_balance(user_id: int, amount: float):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        await db.commit()
+
+async def deduct_user_balance(user_id: int, amount: float):
+    async with aiosqlite.connect(DB_NAME) as db:
+        balance = await get_user_balance(user_id)
+        if balance >= amount:
+            await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, user_id))
+            await db.commit()
+            return True
+        return False
+
 async def add_channel(owner_id: int, username: str, title: str):
     async with aiosqlite.connect(DB_NAME) as db:
         try:
@@ -70,13 +80,11 @@ async def add_channel(owner_id: int, username: str, title: str):
         except Exception:
             return False
 
-# ሁሉንም የተመዘገቡ ቻናሎች ማምጫ
 async def get_all_channels():
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute("SELECT channel_username, title FROM channels")
         return await cursor.fetchall()
 
-# አዲስ ማስታወቂያ መመዝገቢያ
 async def save_ad(advertiser_id: int, target_channel: str, text: str):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
@@ -85,7 +93,6 @@ async def save_ad(advertiser_id: int, target_channel: str, text: str):
         )
         await db.commit()
 
-# የሚለጠፉ ንቁ ማስታወቂያዎችን ማምጫ
 async def get_active_ads():
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute("SELECT target_channel, ad_text FROM ads WHERE status = 'active'")
