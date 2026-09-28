@@ -1,16 +1,30 @@
 import asyncio
 import os
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, CommandObject
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from database import init_db, add_user, get_user_balance
 
-# ቶክንህን ከስር ባሉት ጥቅስ ምልክቶች መሃል በቀጥታ አስገባው
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "የቦት_ቶክንህን_እዚህ_አስገባ")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Render Web Service ነፃውን ፕላን እንዲቀበለው የሚያስችል ሰርቨር
+async def handle_ping(request):
+    return web.Response(text="Bot is online and running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
+# ዋናው የቴሌግራም አዝራሮች ገጽታ
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📢 Advertise"), KeyboardButton(text="👥 Referral")],
@@ -55,9 +69,30 @@ async def referral_handler(message: types.Message):
     )
     await message.answer(text, parse_mode="Markdown")
 
+@dp.message(F.text == "📢 Advertise")
+async def advertise_handler(message: types.Message):
+    await message.answer("📢 ማስታወቂያ ለመለጠፍ በቅርብ ቀን ይጠብቁን።")
+
+@dp.message(F.text == "💳 Deposit")
+async def deposit_handler(message: types.Message):
+    await message.answer("💳 ሂሳብ ለመሙላት በቅርብ ቀን ይጠብቁን።")
+
+@dp.message(F.text == "🏧 Withdraw")
+async def withdraw_handler(message: types.Message):
+    await message.answer("🏧 ገንዘብ ለማውጣት ዝቅተኛው መጠን 20 ETB ነው።")
+
+@dp.message(F.text == "📊 My Ads")
+async def my_ads_handler(message: types.Message):
+    await message.answer("📊 እስካሁን ያስተዋወቁት ማስታወቂያ የለም።")
+
+@dp.message(F.text == "🤖 AI Chat")
+async def ai_chat_handler(message: types.Message):
+    await message.answer("🤖 የ AI ረዳት አገልግሎት በቅርብ ቀን ዝግጁ ይሆናል።")
+
 async def main():
     await init_db()
-    print("ቦቱ ስራ ጀምሯል...")
+    await start_web_server()
+    print("ቦቱ በተሳካ ሁኔታ ስራ ጀምሯል...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
