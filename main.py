@@ -10,12 +10,14 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiocryptopay import AioCryptoPay, Networks
 from database import (
     init_db, add_user, get_user_balance, update_user_balance, deduct_user_balance,
-    add_channel, get_all_channels, save_ad, get_active_ads
+    add_channel, get_all_channels, save_ad, get_active_ads, create_withdrawal
 )
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CRYPTO_TOKEN = "639734:AAyANr5PBtEHPO5344cjssr6BQ5yGI6I7jA"
-AD_PRICE = 1.00  # የአንድ ማስታወቂያ ዋጋ በ USDT
+ADMIN_ID = 6179388927  # የአስተዳዳሪው ቴሌግራም መለያ
+AD_PRICE = 1.00        # የአንድ ማስታወቂያ ዋጋ
+MIN_WITHDRAW = 5.00    # ዝቅተኛው ማውጣት የሚቻለው መጠን
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -25,8 +27,9 @@ class BotStates(StatesGroup):
     waiting_for_channel = State()
     waiting_for_ad_channel = State()
     waiting_for_ad_text = State()
+    waiting_for_withdraw_amount = State()
+    waiting_for_withdraw_wallet = State()
 
-# Render Health Check የሚያልፍበት ዌብ ሰርቨር
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -39,9 +42,6 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     print(f"Web server started on port {port}")
-    # ዌብ ሰርቨሩ Render ጥያቄ እስኪያቀርብ ክፍት ሆኖ እንዲቆይ
-    while True:
-        await asyncio.sleep(3600)
 
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
@@ -100,6 +100,86 @@ async def check_payment_status(callback: types.CallbackQuery):
     else:
         await callback.answer("❌ ክፍያው ገና አልተጠናቀቀም። እባክዎ ከከፈሉ በኋላ ደግመው ይሞክሩ።", show_alert=True)
 
+# ----------------- 🏧 WITHDRAW (ገንዘብ ማውጫ) -----------------
+@dp.message(F.text == "🏧 Withdraw")
+async def withdraw_start(message: types.Message, state: FSMContext):
+    balance = await get_user_balance(message.from_user.id)
+    if balance < MIN_WITHDRAW:
+        await message.answer(
+            f"⚠️ **ዝቅተኛው ማውጣት የሚቻለው መጠን {MIN_WITHDRAW:.2f} USDT ነው።**\n\n"
+            f"የእርስዎ ቀሪ ሂሳብ፦ **{balance:.2f} USDT**",
+            parse_mode="Markdown"
+        )
+        return
+
+    await state.set_state(BotStates.waiting_for_withdraw_amount)
+    await message.answer(
+        f"🏧 **ገንዘብ ማውጫ**\n\n"
+        f"ቀሪ ሂሳብዎ፦ **{balance:.2f} USDT**\n"
+        f"ማውጣት የሚፈልጉትን የገንዘብ መጠን ያስገቡ (ዝቅተኛው {MIN_WITHDRAW:.2f})፦"
+    )
+
+@dp.message(BotStates.waiting_for_withdraw_amount)
+async def process_withdraw_amount(message: types.Message, state: FSMContext):
+    try:
+        amount = float(message.text.strip())
+    except ValueError:
+        await message.answer("❌ እባክዎ ትክክለኛ የቁጥር መጠን ያስገቡ።")
+        return
+
+    balance = await get_user_balance(message.from_user.id)
+    if amount < MIN_WITHDRAW:
+        await message.answer(f"❌ ማውጣት የሚቻለው ዝቅተኛው መጠን **{MIN_WITHDRAW:.2f} USDT** ነው።")
+        return
+    if amount > balance:
+        await message.answer(f"❌ በቂ ቀሪ ሂሳብ የለዎትም። ያለዎት፦ **{balance:.2f} USDT**")
+        return
+
+    await state.update_data(withdraw_amount=amount)
+    await state.set_state(BotStates.waiting_for_withdraw_wallet)
+    await message.answer("📝 ገንዘቡ እንዲላክበት የሚፈልጉትን **USDT Wallet Address** ወይም **@CryptoBot Username** ያስገቡ፦")
+
+@dp.message(BotStates.waiting_for_withdraw_wallet)
+async def process_withdraw_wallet(message: types.Message, state: FSMContext):
+    wallet = message.text.strip()
+    data = await state.get_data()
+    amount = data.get("withdraw_amount")
+    user_id = message.from_user.id
+
+    # ከሂሳቡ መቀነስ
+    deducted = await deduct_user_balance(user_id, amount)
+    if not deducted:
+        await state.clear()
+        await message.answer("⚠️ ክፍያውን መፈጸም አልተቻለም። እባክዎ ደግመው ይሞክሩ።")
+        return
+
+    await create_withdrawal(user_id, amount, wallet)
+    await state.clear()
+
+    # ለተጠቃሚው ማረጋገጫ መስጠት
+    await message.answer(
+        f"✅ **የማውጣት ጥያቄዎ በተሳካ ሁኔታ ተልኳል!**\n\n"
+        f"💵 መጠን፦ **{amount:.2f} USDT**\n"
+        f"📍 አድራሻ፦ `{wallet}`\n\n"
+        "አስተዳዳሪው ክፍያውን አረጋግጦ በጥቂት ደቂቃዎች ውስጥ ይልክልዎታል።",
+        reply_markup=main_menu,
+        parse_mode="Markdown"
+    )
+
+    # ለአስተዳዳሪው (Admin) ማሳወቂያ መላክ
+    try:
+        await bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"🚨 **አዲስ የማውጣት ጥያቄ (Withdrawal Request)**\n\n"
+                 f"👤 ተጠቃሚ፦ {message.from_user.first_name} (`{user_id}`)\n"
+                 f"💵 መጠን፦ **{amount:.2f} USDT**\n"
+                 f"📍 አድራሻ፦ `{wallet}`\n\n"
+                 "እባክዎ ክፍያውን በ CryptoBot ወይም በ Wallet ይላኩላቸው።",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Error alerting admin: {e}")
+
 # ----------------- ➕ ADD CHANNEL -----------------
 @dp.message(F.text == "➕ Add Channel")
 async def register_channel_start(message: types.Message, state: FSMContext):
@@ -135,7 +215,7 @@ async def process_channel_username(message: types.Message, state: FSMContext):
     except Exception:
         await message.answer("❌ ቻናሉን ማግኘት አልተቻለም። ስሙ ትክክል መሆኑንና ቦቱ Admin መደረጉን ያረጋግጡ።")
 
-# ----------------- 📢 ADVERTISE (ክፍያ ማጣሪያ ያለው) -----------------
+# ----------------- 📢 ADVERTISE -----------------
 @dp.message(F.text == "📢 Advertise")
 async def choose_channel_to_advertise(message: types.Message):
     channels = await get_all_channels()
@@ -167,7 +247,6 @@ async def process_ad_submission(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     balance = await get_user_balance(user_id)
 
-    # 1. ሂሳብ ማረጋገጥ
     if balance < AD_PRICE:
         await state.clear()
         deposit_button = InlineKeyboardMarkup(inline_keyboard=[
@@ -183,14 +262,12 @@ async def process_ad_submission(message: types.Message, state: FSMContext):
         )
         return
 
-    # 2. ክፍያ መቀነስ
     deducted = await deduct_user_balance(user_id, AD_PRICE)
     if not deducted:
         await state.clear()
         await message.answer("⚠️ ክፍያውን መፈጸም አልተቻለም። እባክዎ ደግመው ይሞክሩ።")
         return
 
-    # 3. ማስታወቂያ መመዝገብ
     data = await state.get_data()
     target_channel = data.get("target_channel")
     ad_content = message.text
@@ -213,7 +290,7 @@ async def forward_to_deposit(callback: types.CallbackQuery):
     await callback.answer()
     await deposit_handler(callback.message)
 
-# ----------------- ራስ-ሰር ፖስተር (በየ 8 ሰዓቱ) -----------------
+# ----------------- ራስ-ሰር ፖስተር -----------------
 async def post_ads_to_channels():
     ads = await get_active_ads()
     for target_channel, text in ads:
@@ -232,7 +309,7 @@ async def balance_handler(message: types.Message):
 @dp.message(F.text == "👥 Referral")
 async def referral_handler(message: types.Message):
     bot_info = await bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
+    ref_link = f"https://t.me/{bot_info.username}?start={message.from_user.id}[span_2](start_span)[span_3](start_span)"[span_2](end_span)[span_3](end_span)
     await message.answer(f"👥 **የመጋበዣ ሊንክዎ**፦\n`{ref_link}`", parse_mode="Markdown")
 
 async def run_bot():
@@ -244,7 +321,6 @@ async def run_bot():
     await dp.start_polling(bot)
 
 async def main():
-    # ዌብ ሰርቨሩ እና ቦቱ ጎን ለጎን እኩል እንዲሰሩ
     await asyncio.gather(
         start_web_server(),
         run_bot()
