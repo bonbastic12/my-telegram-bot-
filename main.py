@@ -25,7 +25,7 @@ MIN_WITHDRAW = 5.00
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 crypto = AioCryptoPay(token=CRYPTO_TOKEN, network=Networks.MAIN_NET)
-ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 class BotStates(StatesGroup):
     waiting_for_channel = State()
@@ -98,10 +98,6 @@ async def ai_chat_exit(message: types.Message, state: FSMContext):
 
 @dp.message(BotStates.waiting_for_ai_prompt)
 async def ai_chat_response(message: types.Message):
-    if not GEMINI_API_KEY:
-        await message.answer("⚠️ የ AI አገልግሎት አልተገናኘም። እባክዎ አስተዳዳሪውን ያነጋግሩ።")
-        return
-
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
         response = ai_client.models.generate_content(
@@ -110,6 +106,7 @@ async def ai_chat_response(message: types.Message):
         )
         await message.answer(response.text)
     except Exception as e:
+        print(f"AI Error: {e}")
         await message.answer("❌ ይቅርታ፣ ምላሽ መስጠት አልተቻለም። እባክዎ ጥቂት ቆይተው እንደገና ይሞክሩ።")
 
 # ----------------- 💳 DEPOSIT (CRYPTO PAY) -----------------
