@@ -78,7 +78,7 @@ async def start_handler(message: types.Message, command: CommandObject):
         parse_mode="Markdown"
     )
 
-# ----------------- 🤖 AI CHAT (Gemini 3.8 Flash) -----------------
+# ----------------- 🤖 AI CHAT (የተረጋጋ አማርኛና እንግሊዝኛ) -----------------
 @dp.message(F.text == "🤖 AI Chat")
 async def ai_chat_start(message: types.Message, state: FSMContext):
     await state.set_state(BotStates.waiting_for_ai_prompt)
@@ -87,7 +87,7 @@ async def ai_chat_start(message: types.Message, state: FSMContext):
         resize_keyboard=True
     )
     await message.answer(
-        "🤖 **የ AI ረዳት ክፍል (Gemini 3.8 Flash)**\n\n"
+        "🤖 **የ AI ረዳት ክፍል**\n\n"
         "የሚፈልጉትን ማንኛውንም ጥያቄ፣ ለማስታወቂያ የሚሆን የጽሑፍ ሃሳብ ወይም ማንኛውንም ርዕስ ይጠይቁኝ፦\n"
         "*(ለመውጣት '🔙 Back to Menu' የሚለውን ይጫኑ)*",
         reply_markup=cancel_btn,
@@ -107,23 +107,23 @@ async def ai_chat_response(message: types.Message):
 
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
-    # መጀመሪያ 3.8 Flash ይሞክራል፤ በጎግል በኩል 503 ጫና ካለ ወደ 2.5 Flash ይቀይራል
-    models_to_try = ["gemini-3.8-flash", "gemini-2.5-flash"]
-    for model_name in models_to_try:
+    # በአማርኛም በእንግሊዝኛም የተረጋጋ ፈጣን መልስ እንዲሰጥ ማስተካከል
+    prompt = message.text
+    for attempt in range(2):
         try:
             response = await asyncio.to_thread(
                 ai_client.models.generate_content,
-                model=model_name,
-                contents=message.text
+                model="gemini-2.5-flash",
+                contents=prompt
             )
             if response and response.text:
                 await message.answer(response.text)
                 return
         except Exception as e:
-            print(f"Error on {model_name}: {e}")
-            continue
+            print(f"Attempt {attempt+1} failed: {e}")
+            await asyncio.sleep(1)
 
-    await message.answer("❌ በአሁኑ ሰዓት በ AI ሰርቨር ላይ ከፍተኛ ጫና ስላለ ምላሽ መስጠት አልተቻለም። እባክዎ ጥቂት ቆይተው እንደገና ይሞክሩ።")
+    await message.answer("⚠️ ይቅርታ፣ በአሁኑ ሰዓት የ AI ሰርቨሩ ስራ በዝቶበታል። እባክዎ ከጥቂት ሰኮንዶች በኋላ ደግመው ይሞክሩ።")
 
 # ----------------- 💳 DEPOSIT (CRYPTO PAY) -----------------
 @dp.message(F.text == "💳 Deposit")
