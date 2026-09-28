@@ -2,3 +2,4 @@ aiogram
 aiosqlite
 aiohttp
 apscheduler
+aiocryptopay
