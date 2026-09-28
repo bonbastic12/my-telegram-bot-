@@ -3,4 +3,4 @@ aiosqlite
 aiohttp
 apscheduler
 aiocryptopay
-google-genai
+google-genai==2.25.0
