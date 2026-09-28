@@ -28,6 +28,16 @@ async def init_db():
                 status TEXT DEFAULT 'active'
             )
         """)
+        # የገንዘብ ማውጣት ጥያቄዎች ሰንጠረዥ
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount REAL,
+                wallet_address TEXT,
+                status TEXT DEFAULT 'pending'
+            )
+        """)
         await db.commit()
 
 async def add_user(user_id: int, referrer_id: int = None):
@@ -97,3 +107,12 @@ async def get_active_ads():
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute("SELECT target_channel, ad_text FROM ads WHERE status = 'active'")
         return await cursor.fetchall()
+
+# አዲስ የማውጣት ጥያቄ መመዝገቢያ
+async def create_withdrawal(user_id: int, amount: float, wallet: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO withdrawals (user_id, amount, wallet_address) VALUES (?, ?, ?)",
+            (user_id, amount, wallet)
+        )
+        await db.commit()
