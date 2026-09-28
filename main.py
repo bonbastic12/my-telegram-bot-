@@ -7,20 +7,24 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from database import init_db, add_user, get_user_balance, add_channel, get_all_channels, save_ad, get_active_ads
+from aiocryptopay import AioCryptoPay, Networks
+from database import (
+    init_db, add_user, get_user_balance, update_user_balance,
+    add_channel, get_all_channels, save_ad, get_active_ads
+)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CRYPTO_TOKEN = "639734:AAyANr5PBtEHPO5344cjssr6BQ5yGI6I7jA"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+crypto = AioCryptoPay(token=CRYPTO_TOKEN, network=Networks.MAIN_NET)
 
-# ደረጃዎችን መቆጣጠሪያ (FSM States)
 class BotStates(StatesGroup):
     waiting_for_channel = State()
     waiting_for_ad_channel = State()
     waiting_for_ad_text = State()
 
-# Render እንዳይዘጋ የሚያስችል
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -33,7 +37,6 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-# ዋናው ሜኑ (➕ Add Channel ተጨምሮበታል)
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📢 Advertise"), KeyboardButton(text="➕ Add Channel")],
@@ -61,7 +64,38 @@ async def start_handler(message: types.Message, command: CommandObject):
         parse_mode="Markdown"
     )
 
-# ----------------- 1. የቻናል ምዝገባ (ADD CHANNEL) -----------------
+# ----------------- 💳 DEPOSIT (CRYPTO PAY) -----------------
+@dp.message(F.text == "💳 Deposit")
+async def deposit_handler(message: types.Message):
+    # መነሻ የ $1.00 USDT ኢንቮይስ ያዘጋጃል
+    invoice = await crypto.create_invoice(asset='USDT', amount=1.0)
+    
+    pay_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Pay 1.00 USDT", url=invoice.bot_invoice_url)],
+        [InlineKeyboardButton(text="🔄 Verify Payment", callback_data=f"verify_pay:{invoice.invoice_id}:1.0")]
+    ])
+    
+    await message.answer(
+        "💳 **Crypto Deposit (USDT)**\n\n"
+        "ወደ ሂሳብዎ **1.00 USDT** ለመጨመር ከታች ያለውን **Pay 1.00 USDT** የሚለውን ቁልፍ ተጭነው ይክፈሉ።\n\n"
+        "ክፍያውን እንደፈጸሙ **Verify Payment** የሚለውን በመጫን ያረጋግጡ።",
+        reply_markup=pay_keyboard,
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data.startswith("verify_pay:"))
+async def check_payment_status(callback: types.CallbackQuery):
+    _, invoice_id, amount = callback.data.split(":")
+    invoices = await crypto.get_invoices(invoice_ids=[int(invoice_id)])
+    
+    if invoices and invoices[0].status == 'paid':
+        await update_user_balance(callback.from_user.id, float(amount))
+        await callback.message.answer(f"✅ ክፍያዎ ተረጋግጧል! **${amount} USDT** ወደ ሂሳብዎ ተጨምሯል።")
+        await callback.answer()
+    else:
+        await callback.answer("❌ ክፍያው ገና አልተጠናቀቀም። እባክዎ ከከፈሉ በኋላ ደግመው ይሞክሩ።", show_alert=True)
+
+# ----------------- ➕ ADD CHANNEL -----------------
 @dp.message(F.text == "➕ Add Channel")
 async def register_channel_start(message: types.Message, state: FSMContext):
     await state.set_state(BotStates.waiting_for_channel)
@@ -80,7 +114,6 @@ async def process_channel_username(message: types.Message, state: FSMContext):
 
     try:
         chat = await bot.get_chat(channel_username)
-        # ቦቱ በቻናሉ ላይ Admin መሆኑን ማረጋገጥ
         member = await bot.get_chat_member(chat.id, (await bot.get_me()).id)
         if member.status not in ["administrator", "creator"]:
             await message.answer("❌ እባክዎ መጀመሪያ ቦቱን በቻናሉ ላይ Admin ያድርጉት!")
@@ -97,7 +130,7 @@ async def process_channel_username(message: types.Message, state: FSMContext):
     except Exception:
         await message.answer("❌ ቻናሉን ማግኘት አልተቻለም። ስሙ ትክክል መሆኑንና ቦቱ Admin መደረጉን ያረጋግጡ።")
 
-# ----------------- 2. ማስታወቂያ ማስያዝ (ADVERTISE) -----------------
+# ----------------- 📢 ADVERTISE -----------------
 @dp.message(F.text == "📢 Advertise")
 async def choose_channel_to_advertise(message: types.Message):
     channels = await get_all_channels()
@@ -105,7 +138,6 @@ async def choose_channel_to_advertise(message: types.Message):
         await message.answer("⚠️ በአሁኑ ሰዓት የተመዘገበ ቻናል የለም። እባክዎ ቆየት ብለው ይሞክሩ ወይም በ '➕ Add Channel' በኩል የራስዎን ቻናል ይመዝግቡ።")
         return
 
-    # የተመዘገቡ ቻናሎችን በአዝራር ማሳየት
     keyboard = []
     for username, title in channels:
         keyboard.append([InlineKeyboardButton(text=f"📢 {title} ({username})", callback_data=f"adto:{username}")])
@@ -135,7 +167,7 @@ async def process_ad_submission(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-# ----------------- 3. ራስ-ሰር ፖስተር (በየ 8 ሰዓቱ) -----------------
+# ----------------- ራስ-ሰር ፖስተር (በየ 8 ሰዓቱ) -----------------
 async def post_ads_to_channels():
     ads = await get_active_ads()
     for target_channel, text in ads:
@@ -149,7 +181,7 @@ async def post_ads_to_channels():
 @dp.message(F.text == "💰 Balance")
 async def balance_handler(message: types.Message):
     balance = await get_user_balance(message.from_user.id)
-    await message.answer(f"💰 ቀሪ ሂሳብዎ፦ **{balance:.2f} ETB**", parse_mode="Markdown")
+    await message.answer(f"💰 ቀሪ ሂሳብዎ፦ **{balance:.2f} USDT**", parse_mode="Markdown")
 
 @dp.message(F.text == "👥 Referral")
 async def referral_handler(message: types.Message):
@@ -161,7 +193,6 @@ async def main():
     await init_db()
     await start_web_server()
 
-    # በየ 8 ሰዓቱ (በቀን 3 ጊዜ) ማስታወቂያዎችን እንዲለጥፍ
     scheduler = AsyncIOScheduler()
     scheduler.add_job(post_ads_to_channels, 'interval', hours=8)
     scheduler.start()
