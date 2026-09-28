@@ -652,11 +652,21 @@ async def run_bot():
 
 
 async def main():
-    await asyncio.gather(
-        start_web_server(),
-        run_bot(),
-    )
+    print("Starting Digital Pro Ads...")
+
+    # Start Render web server first
+    await start_web_server()
+
+    # Then start Telegram bot
+    await run_bot()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Bot stopped.")
+    except Exception as e:
+        print("FATAL ERROR:")
+        traceback.print_exc()
+        raise
