@@ -1,115 +1,118 @@
-<!DOCTYPE html>
-<html lang="am">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Digital Pro Ads</title>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background-color: var(--tg-theme-bg-color, #f4f6f8);
-            color: var(--tg-theme-text-color, #1a1a1a);
-            margin: 0;
-            padding: 16px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-        .container {
-            width: 100%;
-            max-width: 420px;
-        }
-        .header {
-            text-align: center;
-            margin-bottom: 20px;
-        }
-        .header h1 {
-            font-size: 22px;
-            margin: 0;
-            color: var(--tg-theme-button-color, #2481cc);
-        }
-        .card {
-            background-color: var(--tg-theme-secondary-bg-color, #ffffff);
-            border-radius: 14px;
-            padding: 18px;
-            margin-bottom: 14px;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-            text-align: center;
-        }
-        .balance-label {
-            font-size: 13px;
-            opacity: 0.7;
-            margin-bottom: 4px;
-        }
-        .balance-val {
-            font-size: 28px;
-            font-weight: 700;
-        }
-        .btn-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            margin-top: 10px;
-        }
-        button {
-            width: 100%;
-            padding: 14px 10px;
-            border-radius: 10px;
-            border: none;
-            background-color: var(--tg-theme-button-color, #2481cc);
-            color: var(--tg-theme-button-text-color, #ffffff);
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: opacity 0.2s;
-        }
-        button:active {
-            opacity: 0.8;
-        }
-        .btn-full {
-            grid-column: span 2;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Digital Pro Ads</h1>
-            <p id="user-greeting" style="font-size: 14px; opacity: 0.8; margin-top: 6px;">እንኳን ደህና መጡ!</p>
-        </div>
+import aiosqlite
 
-        <div class="card">
-            <div class="balance-label">ቀሪ ሂሳብ (Balance)</div>
-            <div class="balance-val">0.00 <span style="font-size: 16px;">USDT</span></div>
-        </div>
+DB_NAME = "bot_database.db"
 
-        <div class="card">
-            <div class="btn-grid">
-                <button onclick="sendAction('📢 Advertise')">📢 Advertise</button>
-                <button onclick="sendAction('➕ Add Channel')">➕ Add Channel</button>
-                <button onclick="sendAction('💳 Deposit')">💳 Deposit</button>
-                <button onclick="sendAction('🏧 Withdraw')">🏧 Withdraw</button>
-                <button onclick="sendAction('📊 My Ads')">📊 My Ads</button>
-                <button onclick="sendAction('💰 Balance')">💰 Balance</button>
-                <button class="btn-full" onclick="sendAction('🤖 AI Chat')">🤖 AI Assistant</button>
-            </div>
-        </div>
-    </div>
+async def init_db():
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                referrer_id INTEGER,
+                balance REAL DEFAULT 0.0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER,
+                channel_username TEXT UNIQUE,
+                title TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                advertiser_id INTEGER,
+                target_channel TEXT,
+                ad_text TEXT,
+                status TEXT DEFAULT 'active'
+            )
+        """)
+        # የገንዘብ ማውጣት ጥያቄዎች ሰንጠረዥ
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount REAL,
+                wallet_address TEXT,
+                status TEXT DEFAULT 'pending'
+            )
+        """)
+        await db.commit()
 
-    <script>
-        const tg = window.Telegram.WebApp;
-        tg.ready();
-        tg.expand();
+async def add_user(user_id: int, referrer_id: int = None):
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+        user = await cursor.fetchone()
+        if not user:
+            await db.execute(
+                "INSERT INTO users (user_id, referrer_id) VALUES (?, ?)", 
+                (user_id, referrer_id)
+            )
+            if referrer_id:
+                await db.execute(
+                    "UPDATE users SET balance = balance + 0.50 WHERE user_id = ?", 
+                    (referrer_id,)
+                )
+            await db.commit()
+            return True
+        return False
 
-        if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
-            document.getElementById('user-greeting').innerText = `እንኳን ደህና መጡ፣ ${tg.initDataUnsafe.user.first_name}!`;
-        }
+async def get_user_balance(user_id: int):
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        result = await cursor.fetchone()
+        return result[0] if result else 0.0
 
-        function sendAction(actionText) {
-            tg.sendData(actionText);
-            tg.close();
-        }
-    </script>
-</body>
-</html>
+async def update_user_balance(user_id: int, amount: float):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        await db.commit()
+
+async def deduct_user_balance(user_id: int, amount: float):
+    async with aiosqlite.connect(DB_NAME) as db:
+        balance = await get_user_balance(user_id)
+        if balance >= amount:
+            await db.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, user_id))
+            await db.commit()
+            return True
+        return False
+
+async def add_channel(owner_id: int, username: str, title: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        try:
+            await db.execute(
+                "INSERT INTO channels (owner_id, channel_username, title) VALUES (?, ?, ?)",
+                (owner_id, username, title)
+            )
+            await db.commit()
+            return True
+        except Exception:
+            return False
+
+async def get_all_channels():
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("SELECT channel_username, title FROM channels")
+        return await cursor.fetchall()
+
+async def save_ad(advertiser_id: int, target_channel: str, text: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO ads (advertiser_id, target_channel, ad_text) VALUES (?, ?, ?)",
+            (advertiser_id, target_channel, text)
+        )
+        await db.commit()
+
+async def get_active_ads():
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("SELECT target_channel, ad_text FROM ads WHERE status = 'active'")
+        return await cursor.fetchall()
+
+# አዲስ የማውጣት ጥያቄ መመዝገቢያ
+async def create_withdrawal(user_id: int, amount: float, wallet: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO withdrawals (user_id, amount, wallet_address) VALUES (?, ?, ?)",
+            (user_id, amount, wallet)
+        )
+        await db.commit()
